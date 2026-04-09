@@ -11,16 +11,16 @@ pub struct SignatureCache {
 }
 
 struct CacheState {
-    signatures: HashSet<String>,
-    entries: Vec<(String, Instant)>,
+    signatures: HashSet<Arc<str>>,
+    entries: Vec<(Arc<str>, Instant)>,
 }
 
 impl SignatureCache {
     pub fn new(ttl: Duration) -> Self {
         let cache = Self {
             inner: Arc::new(RwLock::new(CacheState {
-                signatures: HashSet::new(),
-                entries: Vec::new(),
+                signatures: HashSet::with_capacity(1024),
+                entries: Vec::with_capacity(1024),
             })),
             ttl,
         };
@@ -35,13 +35,14 @@ impl SignatureCache {
     }
 
     pub async fn insert(&self, signature: String) {
+        let sig: Arc<str> = Arc::from(signature.into_boxed_str());
         let mut state = self.inner.write().await;
-        state.signatures.insert(signature.clone());
-        state.entries.push((signature, Instant::now()));
+        state.signatures.insert(Arc::clone(&sig));
+        state.entries.push((sig, Instant::now()));
     }
 
     fn start_cleanup_task(&self) {
-        let inner = self.inner.clone();
+        let inner = Arc::clone(&self.inner);
         let ttl = self.ttl;
 
         tokio::spawn(async move {
@@ -56,10 +57,23 @@ impl SignatureCache {
                 let cutoff = now - ttl;
                 let split_idx = state.entries.partition_point(|(_, time)| *time <= cutoff);
 
-                let expired: Vec<String> =
-                    state.entries.drain(..split_idx).map(|(s, _)| s).collect();
-                for sig in expired {
-                    state.signatures.remove(&sig);
+                if split_idx > 0 {
+                    let expired: Vec<Arc<str>> = state
+                        .entries
+                        .drain(..split_idx)
+                        .map(|(s, _)| s)
+                        .collect();
+                    for sig in expired {
+                        state.signatures.remove(sig.as_ref());
+                    }
+
+                    // Shrink if we've removed a significant portion
+                    if state.entries.capacity() > state.entries.len() * 4
+                        && state.entries.len() < 100
+                    {
+                        state.entries.shrink_to_fit();
+                        state.signatures.shrink_to_fit();
+                    }
                 }
             }
         });

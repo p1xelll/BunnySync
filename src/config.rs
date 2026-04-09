@@ -33,7 +33,6 @@ impl fmt::Debug for ProjectConfig {
 #[derive(Clone)]
 pub struct Config {
     pub bind_addr: String,
-    #[allow(dead_code)]
     pub bunny_api_key: String,
     pub projects: HashMap<String, ProjectConfig>,
 }

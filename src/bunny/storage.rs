@@ -1,15 +1,18 @@
 use crate::types::RemoteFileSet;
 use anyhow::{Context, Result, anyhow};
-use reqwest::Client;
+use reqwest::{Client, ClientBuilder};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::io::AsyncReadExt;
 use tracing::debug;
 
 pub struct BunnyStorage {
     client: Client,
-    storage_zone: String,
-    password: String,
+    storage_zone: Arc<str>,
+    password: Arc<str>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -26,8 +29,8 @@ impl Clone for BunnyStorage {
     fn clone(&self) -> Self {
         Self {
             client: self.client.clone(),
-            storage_zone: self.storage_zone.clone(),
-            password: self.password.clone(),
+            storage_zone: Arc::clone(&self.storage_zone),
+            password: Arc::clone(&self.password),
         }
     }
 }
@@ -36,7 +39,11 @@ fn join_path(dir: &str, name: &str) -> String {
     if dir.is_empty() {
         name.to_string()
     } else {
-        format!("{}/{}", dir, name)
+        let mut result = String::with_capacity(dir.len() + name.len() + 1);
+        result.push_str(dir);
+        result.push('/');
+        result.push_str(name);
+        result
     }
 }
 
@@ -49,22 +56,27 @@ fn encode_path(path: &str) -> String {
 
 impl BunnyStorage {
     pub fn new(storage_zone: String, password: String) -> Self {
+        let client = ClientBuilder::new()
+            .timeout(Duration::from_secs(60))
+            .pool_max_idle_per_host(10)
+            .pool_idle_timeout(Duration::from_secs(30))
+            .http2_prior_knowledge()
+            .build()
+            .expect("Failed to build HTTP client");
+
         Self {
-            client: Client::new(),
-            storage_zone,
-            password,
+            client,
+            storage_zone: Arc::from(storage_zone.into_boxed_str()),
+            password: Arc::from(password.into_boxed_str()),
         }
     }
 
-    /// Recursively list all files and directories in storage zone
-    /// Bunny Storage Edge requires manual recursion for subdirectories
     pub async fn list_files(&self, _path: &str) -> Result<RemoteFileSet> {
         let mut all_files = HashMap::new();
         let mut all_directories = Vec::new();
-        let mut dirs_to_scan = vec!["".to_string()];
+        let mut dirs_to_scan = vec![String::new()];
 
         while let Some(dir) = dirs_to_scan.pop() {
-            // Bunny Storage API requires trailing slash for directory listing
             let url = if dir.is_empty() {
                 format!("https://storage.bunnycdn.com/{}/", self.storage_zone)
             } else {
@@ -79,7 +91,7 @@ impl BunnyStorage {
             let response = self
                 .client
                 .get(&url)
-                .header("AccessKey", &self.password)
+                .header("AccessKey", self.password.as_ref())
                 .send()
                 .await
                 .context("failed to list files")?;
@@ -106,7 +118,6 @@ impl BunnyStorage {
 
                 if is_dir {
                     let dir_path = join_path(&dir, &item.name);
-                    // Don't add root directory
                     if !dir_path.is_empty() {
                         all_directories.push(dir_path.clone());
                     }
@@ -128,23 +139,45 @@ impl BunnyStorage {
         })
     }
 
-    pub async fn upload_file(&self, remote_path: &str, content: &[u8]) -> Result<()> {
+    pub async fn upload_file_from_path(
+        &self,
+        remote_path: &str,
+        file_path: &std::path::Path,
+    ) -> Result<()> {
         let url = format!(
             "https://storage.bunnycdn.com/{}/{}",
             self.storage_zone,
             encode_path(remote_path)
         );
 
-        // Calculate SHA-256 checksum
-        let checksum = Sha256::digest(content);
-        let checksum_hex = hex::encode_upper(checksum);
+        let mut file = tokio::fs::File::open(file_path)
+            .await
+            .context("failed to open file")?;
+
+        let mut hasher = Sha256::new();
+        let mut buffer = vec![0u8; 64 * 1024];
+        let mut content = Vec::new();
+
+        loop {
+            let n = file
+                .read(&mut buffer)
+                .await
+                .context("failed to read file")?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buffer[..n]);
+            content.extend_from_slice(&buffer[..n]);
+        }
+
+        let checksum_hex = hex::encode_upper(hasher.finalize());
 
         let response = self
             .client
             .put(&url)
-            .header("AccessKey", &self.password)
+            .header("AccessKey", self.password.as_ref())
             .header("Checksum", &checksum_hex)
-            .body(content.to_vec())
+            .body(content)
             .send()
             .await
             .context("failed to upload file")?;
@@ -166,7 +199,7 @@ impl BunnyStorage {
         let response = self
             .client
             .delete(&url)
-            .header("AccessKey", &self.password)
+            .header("AccessKey", self.password.as_ref())
             .send()
             .await
             .context("failed to delete file")?;
@@ -179,9 +212,6 @@ impl BunnyStorage {
     }
 
     pub async fn delete_directory(&self, remote_path: &str) -> Result<()> {
-        // Note: Bunny Storage API doesn't have a direct directory delete endpoint
-        // We need to delete the directory by path (which should be empty after file deletions)
-        // The API treats directories as objects with trailing slashes
         let url = format!(
             "https://storage.bunnycdn.com/{}/{}/",
             self.storage_zone,
@@ -197,12 +227,11 @@ impl BunnyStorage {
         let response = self
             .client
             .delete(&url)
-            .header("AccessKey", &self.password)
+            .header("AccessKey", self.password.as_ref())
             .send()
             .await
             .context("failed to delete directory")?;
 
-        // 404 is OK - directory might already be deleted or never existed
         if response.status().is_success() || response.status().as_u16() == 404 {
             debug!(
                 event = "storage.delete_directory.success",

@@ -3,14 +3,16 @@ use crate::bunny::storage::BunnyStorage;
 use crate::config::ProjectConfig;
 use crate::deploy_queue::DeployQueue;
 use crate::diff::{
-    compute_delta, count_modified, get_deletions, get_dir_deletions, get_purge_urls, get_skips, get_uploads,
+    compute_delta, count_modified, get_deletions, get_dir_deletions, get_purge_urls, get_skips,
+    get_uploads,
 };
 use crate::providers::detect_provider;
 use crate::signature_cache::SignatureCache;
+use crate::types::LocalFileSet;
 use anyhow::{Context, Result};
 use axum::{
     Router,
-    extract::{Path, Query, State},
+    extract::{Path, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Json},
     routing::{get, post},
@@ -19,14 +21,22 @@ use git2::{FetchOptions, Repository};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::fs;
-
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
+use tokio::fs;
+use tokio::io::AsyncReadExt;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
 use tracing::{debug, error, info, warn};
+use walkdir::WalkDir;
+
+const UPLOAD_CONCURRENCY: usize = 10;
+const DELETE_CONCURRENCY: usize = 10;
+const PURGE_CONCURRENCY: usize = 5;
+const MAX_UPLOAD_RETRIES: u32 = 3;
+const RETRY_BASE_DELAY_MS: u64 = 100;
+const BUFFER_SIZE: usize = 64 * 1024; // 64KB buffer
 
 #[derive(Serialize)]
 struct DeployResponse {
@@ -88,44 +98,9 @@ async fn health_handler() -> impl IntoResponse {
 async fn handle_webhook(
     State(state): State<AppState>,
     Path(project_id): Path<String>,
-    Query(params): Query<HashMap<String, String>>,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> axum::response::Response {
-    // Check for test mode - only verify signature and return, no deploy
-    if params
-        .get("test")
-        .map(|v| v == "1" || v == "true")
-        .unwrap_or(false)
-    {
-        info!(
-            event = "webhook.test_mode",
-            project_id = %project_id,
-            "test mode detected - validating only, no deploy"
-        );
-
-        // Still verify the project exists
-        if !state.config.projects.contains_key(&project_id) {
-            return (StatusCode::NOT_FOUND, "project not found").into_response();
-        }
-
-        // Still verify signature
-        let provider = match detect_provider(&headers) {
-            Some(p) => p,
-            None => return (StatusCode::BAD_REQUEST, "unknown provider").into_response(),
-        };
-
-        let project = state.config.projects.get(&project_id).unwrap();
-        if provider.verify_signature(&body, &headers, &project.webhook_secret).is_err() {
-            return (StatusCode::UNAUTHORIZED, "invalid signature").into_response();
-        }
-
-        return (
-            StatusCode::OK,
-            "test webhook received - project configured correctly, signature valid",
-        )
-            .into_response();
-    }
     info!(
         event = "webhook.received",
         project_id = %project_id,
@@ -271,12 +246,10 @@ struct DeployStats {
     dirs_deleted: usize,
 }
 
-use crate::types::LocalFileSet;
-
 async fn deploy_project(
     project: &ProjectConfig,
     push_event: &crate::providers::PushEvent,
-    _api_key: String,
+    api_key: String,
 ) -> Result<DeployStats> {
     let temp_dir = TempDir::new().context("failed to create temp directory")?;
     let repo_path = temp_dir.path().join("repo");
@@ -296,7 +269,6 @@ async fn deploy_project(
 
     let remote_files = storage.list_files("").await?;
 
-    // Debug: Log file counts and sample checksums
     debug!(
         event = "deploy.file_counts",
         local_count = local_files.files.len(),
@@ -306,39 +278,18 @@ async fn deploy_project(
         "local vs remote file counts"
     );
 
-    // Log first 5 local files with checksums
-    for (i, (path, checksum)) in local_files.files.iter().take(5).enumerate() {
-        debug!(
-            event = "deploy.local_file_sample",
-            index = i,
-            path = %path,
-            checksum = %checksum,
-            "local file sample"
-        );
-    }
-
-    // Log first 5 remote files with checksums
-    for (i, (path, checksum)) in remote_files.files.iter().take(5).enumerate() {
-        debug!(
-            event = "deploy.remote_file_sample",
-            index = i,
-            path = %path,
-            checksum = %checksum,
-            "remote file sample"
-        );
-    }
-
-    let deltas = compute_delta(&local_files.files, &remote_files.files, &local_files.directories, &remote_files.directories);
+    let deltas = compute_delta(
+        &local_files.files,
+        &remote_files.files,
+        &local_files.directories,
+        &remote_files.directories,
+    );
 
     // Calculate stats before consuming the vectors
     let uploaded_count = get_uploads(&deltas).len();
     let deleted_count = get_deletions(&deltas).len();
     let modified_count = count_modified(&deltas);
     let skipped_count = get_skips(&deltas).len();
-
-    let uploads = get_uploads(&deltas);
-    let deletions = get_deletions(&deltas);
-
     let dir_deletions = get_dir_deletions(&deltas);
     let dir_deletion_count = dir_deletions.len();
 
@@ -356,22 +307,25 @@ async fn deploy_project(
         "delta computed"
     );
 
-    let semaphore = Arc::new(Semaphore::new(10));
-    let storage = BunnyStorage::new(
+    // Execute uploads in parallel with concurrency limit
+    let semaphore = Arc::new(Semaphore::new(UPLOAD_CONCURRENCY));
+    let storage = Arc::new(BunnyStorage::new(
         project.bunny_storage_zone.clone(),
         project.bunny_storage_password.clone(),
-    );
+    ));
 
+    let uploads = get_uploads(&deltas);
     let mut upload_tasks = JoinSet::new();
+
     for delta in uploads {
-        let storage = storage.clone();
+        let storage = Arc::clone(&storage);
         let path = repo_path.join(&delta.path);
         let remote_path = delta.path.clone();
-        let permit = semaphore.clone();
+        let permit = Arc::clone(&semaphore);
 
         upload_tasks.spawn(async move {
             let _permit = permit.acquire().await;
-            upload_with_retry(&storage, &path, &remote_path, 3).await
+            upload_with_retry(&storage, &path, &remote_path, MAX_UPLOAD_RETRIES).await
         });
     }
 
@@ -379,11 +333,20 @@ async fn deploy_project(
         result??;
     }
 
+    // Execute deletions in parallel
+    let deletions = get_deletions(&deltas);
+    let delete_semaphore = Arc::new(Semaphore::new(DELETE_CONCURRENCY));
     let mut delete_tasks = JoinSet::new();
+
     for delta in deletions {
-        let storage = storage.clone();
+        let storage = Arc::clone(&storage);
         let path = delta.path.clone();
-        delete_tasks.spawn(async move { storage.delete_file(&path).await });
+        let permit = Arc::clone(&delete_semaphore);
+
+        delete_tasks.spawn(async move {
+            let _permit = permit.acquire().await;
+            storage.delete_file(&path).await
+        });
     }
 
     while let Some(result) = delete_tasks.join_next().await {
@@ -401,7 +364,7 @@ async fn deploy_project(
 
     let mut dir_delete_tasks = JoinSet::new();
     for dir_path in dir_deletions_sorted {
-        let storage = storage.clone();
+        let storage = Arc::clone(&storage);
         dir_delete_tasks.spawn(async move { storage.delete_directory(&dir_path).await });
     }
 
@@ -410,45 +373,33 @@ async fn deploy_project(
         match result {
             Ok(Ok(())) => successful_dir_deletions += 1,
             Ok(Err(e)) => {
-                warn!(
-                    event = "dir_delete.failed",
-                    error = %e,
-                    "failed to delete directory"
-                );
+                warn!(event = "dir_delete.failed", error = %e);
             }
             Err(e) => {
-                warn!(
-                    event = "dir_delete.task_failed",
-                    error = %e,
-                    "directory deletion task failed"
-                );
+                warn!(event = "dir_delete.task_failed", error = %e);
             }
         }
     }
 
+    // Purge CDN cache in parallel
     let purge_urls = get_purge_urls(&deltas, &project.bunny_pull_zone_domain);
+    let purged_count = purge_urls.len();
 
     if !purge_urls.is_empty() {
         let api_key = project
             .bunny_api_key
             .clone()
-            .unwrap_or_else(|| std::env::var("BUNNY_API_KEY").unwrap_or_default());
+            .unwrap_or_else(|| api_key.clone());
 
         let cdn = BunnyCdn::new(api_key);
+        let results = cdn.purge_urls_parallel(&purge_urls, PURGE_CONCURRENCY).await;
 
-        for url in &purge_urls {
-            if let Err(e) = cdn.purge_url(url).await {
-                warn!(
-                    event = "purge.failed",
-                    url = %url,
-                    error = %e,
-                    "failed to purge URL"
-                );
+        for (url, result) in results {
+            if let Err(e) = result {
+                warn!(event = "purge.failed", url = %url, error = %e);
             }
         }
     }
-
-    let purged_count = purge_urls.len();
 
     Ok(DeployStats {
         uploaded: uploaded_count,
@@ -469,9 +420,7 @@ async fn upload_with_retry(
     let mut last_error = None;
 
     for attempt in 1..=max_retries {
-        let content = fs::read(path).context("failed to read file")?;
-
-        match storage.upload_file(remote_path, &content).await {
+        match storage.upload_file_from_path(remote_path, path).await {
             Ok(()) => return Ok(()),
             Err(e) => {
                 warn!(
@@ -485,8 +434,8 @@ async fn upload_with_retry(
                 last_error = Some(e);
 
                 if attempt < max_retries {
-                    tokio::time::sleep(std::time::Duration::from_millis(100 * attempt as u64))
-                        .await;
+                    let delay = RETRY_BASE_DELAY_MS * attempt as u64;
+                    tokio::time::sleep(Duration::from_millis(delay)).await;
                 }
             }
         }
@@ -533,8 +482,18 @@ async fn collect_local_files(dir: &std::path::Path) -> Result<LocalFileSet> {
     let mut files = HashMap::new();
     let mut directories = Vec::new();
 
-    for entry in walkdir::WalkDir::new(dir) {
-        let entry = entry?;
+    // Use blocking walkdir in spawn_blocking for large directories
+    let dir_path = dir.to_path_buf();
+    let entries: Vec<_> = tokio::task::spawn_blocking(move || {
+        WalkDir::new(&dir_path)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .collect()
+    })
+    .await
+    .context("walkdir task failed")?;
+
+    for entry in entries {
         let path = entry.path();
         let relative = path.strip_prefix(dir)?;
         let key = relative.to_string_lossy().replace('\\', "/");
@@ -545,17 +504,35 @@ async fn collect_local_files(dir: &std::path::Path) -> Result<LocalFileSet> {
         }
 
         if entry.file_type().is_dir() {
-            // Collect directory (but not root)
             directories.push(key);
         } else if entry.file_type().is_file() {
-            let content = fs::read(path)?;
-            // Use SHA-256 to match Bunny Storage API checksum format
-            let checksum = Sha256::digest(&content);
-            let checksum = hex::encode_upper(checksum);
-
+            // Read file async with buffered I/O
+            let checksum = compute_file_checksum(path).await?;
             files.insert(key, checksum);
         }
     }
 
     Ok(LocalFileSet { files, directories })
+}
+
+async fn compute_file_checksum(path: &std::path::Path) -> Result<String> {
+    let mut file = fs::File::open(path)
+        .await
+        .context("failed to open file")?;
+
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; BUFFER_SIZE];
+
+    loop {
+        let n = file
+            .read(&mut buffer)
+            .await
+            .context("failed to read file")?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buffer[..n]);
+    }
+
+    Ok(hex::encode_upper(hasher.finalize()))
 }

@@ -1,0 +1,51 @@
+version: "3.8"
+
+services:
+  bunnysync:
+    image: yourusername/bunnysync:latest
+    container_name: bunnysync
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      # =================================================================
+      # GLOBAL SETTINGS (required)
+      # =================================================================
+      - BIND_ADDR=0.0.0.0:3000
+      - BUNNY_API_KEY=${BUNNY_API_KEY}
+
+      # =================================================================
+      # PROJECT CONFIGURATION
+      # =================================================================
+      # Add your projects here, or use .env file with ${VARIABLE} syntax
+      # Replace PROJECT_ID with your project identifier
+
+      # Example Project: MYAPP
+      - PROJECT_MYAPP_REPO_URL=${PROJECT_MYAPP_REPO_URL}
+      - PROJECT_MYAPP_WEBHOOK_SECRET=${PROJECT_MYAPP_WEBHOOK_SECRET}
+      - PROJECT_MYAPP_BUNNY_STORAGE_ZONE=${PROJECT_MYAPP_BUNNY_STORAGE_ZONE}
+      - PROJECT_MYAPP_BUNNY_STORAGE_PASSWORD=${PROJECT_MYAPP_BUNNY_STORAGE_PASSWORD}
+      - PROJECT_MYAPP_BUNNY_PULL_ZONE_ID=${PROJECT_MYAPP_BUNNY_PULL_ZONE_ID}
+      - PROJECT_MYAPP_BUNNY_PULL_ZONE_DOMAIN=${PROJECT_MYAPP_BUNNY_PULL_ZONE_DOMAIN}
+      # Optional: project-specific API key
+      # - PROJECT_MYAPP_BUNNY_API_KEY=${PROJECT_MYAPP_BUNNY_API_KEY}
+
+      # Add more projects as needed:
+      # - PROJECT_WEBSITE_REPO_URL=${PROJECT_WEBSITE_REPO_URL}
+      # - PROJECT_WEBSITE_WEBHOOK_SECRET=${PROJECT_WEBSITE_WEBHOOK_SECRET}
+      # etc...
+
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "--quiet",
+          "--tries=1",
+          "--spider",
+          "http://localhost:3000/health",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s

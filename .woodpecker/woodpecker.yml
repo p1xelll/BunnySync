@@ -5,7 +5,6 @@ when:
   - event: push
     branch: main
   - event: pull_request
-    branch: main
   - event: tag
 
 variables:
@@ -13,39 +12,30 @@ variables:
   - &repo "${CI_REPO_OWNER}/bunnysync"
 
 steps:
-  # === QUALITY CHECKS (run first for fast feedback) ===
+  # === QUALITY CHECKS ===
 
-  # Check formatting
   fmt:
     image: rust:1.85-slim-bookworm
     commands:
       - rustup component add rustfmt
       - cargo fmt --check
-    when:
-      - event: [push, pull_request, tag]
 
-  # Lint with clippy
   lint:
     image: rust:1.85-slim-bookworm
     commands:
       - apt-get update && apt-get install -y pkg-config libssl-dev cmake git
       - rustup component add clippy
       - cargo clippy -- -D warnings
-    when:
-      - event: [push, pull_request, tag]
     depends_on: [fmt]
 
-  # Run tests
   test:
     image: rust:1.85-slim-bookworm
     commands:
       - apt-get update && apt-get install -y pkg-config libssl-dev cmake git
       - cargo test --release
-    when:
-      - event: [push, pull_request, tag]
     depends_on: [lint]
 
-  # === PR BUILDS (dry run, no push) ===
+  # === PR BUILDS (dry run) ===
 
   build-pr:
     image: woodpeckerci/plugin-docker-buildx

@@ -26,17 +26,6 @@ impl DeployQueue {
 
         semaphore.try_acquire_owned().ok()
     }
-
-    #[allow(dead_code)]
-    pub async fn is_deploying(&self, project_id: &str) -> bool {
-        let queues = self.inner.lock().await;
-
-        if let Some(semaphore) = queues.get(project_id) {
-            semaphore.available_permits() == 0
-        } else {
-            false
-        }
-    }
 }
 
 #[cfg(test)]
@@ -75,20 +64,5 @@ mod tests {
 
         drop(permit1);
         drop(permit2);
-    }
-
-    #[tokio::test]
-    async fn test_is_deploying() {
-        let queue = DeployQueue::new();
-
-        assert!(!queue.is_deploying("project1").await);
-
-        let permit = queue.acquire("project1").await;
-        assert!(queue.is_deploying("project1").await);
-
-        drop(permit);
-        sleep(Duration::from_millis(10)).await;
-
-        assert!(!queue.is_deploying("project1").await);
     }
 }
