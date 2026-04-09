@@ -1,12 +1,12 @@
 # BunnySync
 
-A webhook receiver that automatically deploys Git repositories to BunnyCDN Storage zones. Supports Forgejo webhooks with automatic CDN cache purging.
+A webhook receiver that automatically deploys Git repositories to BunnyCDN Storage zones. Supports Forgejo (Codeberg) and Tangled webhooks with automatic CDN cache purging.
 
 **Docker Hub:** https://hub.docker.com/r/p1xelll/bunnysync
 
 ## Features
 
-- **Webhook Support**: Receives push events from Forgejo
+- **Webhook Support**: Receives push events from Forgejo (Codeberg) and Tangled
 - **Automatic Deployments**: Clones repo, computes delta, uploads changed files
 - **CDN Integration**: Automatically purges BunnyCDN cache for modified files
 - **Multi-Architecture**: Docker images available for AMD64 and ARM64
@@ -164,16 +164,23 @@ PROJECT_SHOP_BUNNY_PULL_ZONE_ID=222222
 PROJECT_SHOP_BUNNY_PULL_ZONE_DOMAIN=shop.example.com
 ```
 
-## Webhook Setup (Forgejo)
+## Webhook Setup
 
-1. Go to your repository → Settings → Webhooks
-2. Add a new Forgejo webhook
-3. Target URL: `http://your-server:3000/hook/{PROJECT_ID}`
-   - Example: `http://bunnysync.example.com:3000/hook/MYAPP`
-4. HTTP Method: `POST`
-5. Secret: Use the same value as `PROJECT_{PROJECT_ID}_WEBHOOK_SECRET`
-6. Trigger on: **Push events**
-7. Save
+### Forgejo (Codeberg)
+
+1. Go to your repository → **Settings → Webhooks**
+2. Add a new webhook and select **Forgejo** type
+3. Set **Target URL**: `http://your-server:3000/hook/{PROJECT_ID}`
+4. Set **Secret** to match `PROJECT_{PROJECT_ID}_WEBHOOK_SECRET`
+5. Trigger on **Push events** and save
+
+### Tangled
+
+1. Go to your repository → **Settings → Hooks**
+2. Click **new webhook**
+3. Set **Payload URL**: `http://your-server:3000/hook/{PROJECT_ID}`
+4. Set **Secret** to match `PROJECT_{PROJECT_ID}_WEBHOOK_SECRET`
+5. Select **Push events** and save
 
 ## API Endpoints
 
@@ -224,7 +231,8 @@ The application is built with:
 ## Adding a New Provider
 
 BunnySync uses a provider system to support different Git hosting platforms. Currently supported:
-- **Forgejo**
+- **Forgejo** (used by Codeberg)
+- **Tangled** (decentralized Git hosting on AT Protocol)
 
 To add a new provider:
 
@@ -313,14 +321,24 @@ Update `src/providers/mod.rs` to add your provider:
 
 ```rust
 pub mod forgejo;
+pub mod tangled;
 pub mod myprovider;  // Add this line
 
 pub fn detect_provider(headers: &HeaderMap) -> Option<Box<dyn GitProvider>> {
-    if headers.contains_key("X-Forgejo-Event") || headers.contains_key("X-Gitea-Event") {
+    // Check for Forgejo first (Codeberg uses Forgejo - priority platform)
+    if headers.contains_key("X-Forgejo-Event") {
         Some(Box::new(forgejo::ForgejoProvider))
-    } else if headers.contains_key("X-MyProvider-Event") {  // Add this
+    }
+    // Check for Tangled
+    else if headers.contains_key("X-Tangled-Event") {
+        Some(Box::new(tangled::TangledProvider))
+    }
+    // Add your provider here
+    else if headers.contains_key("X-MyProvider-Event") {
         Some(Box::new(myprovider::MyProvider))
-    } else {
+    }
+    // No matching provider found
+    else {
         None
     }
 }

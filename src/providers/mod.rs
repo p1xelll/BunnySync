@@ -1,6 +1,7 @@
 use axum::http::HeaderMap;
 
 pub mod forgejo;
+pub mod tangled;
 
 pub trait GitProvider: Send + Sync {
     fn verify_signature(
@@ -20,9 +21,18 @@ pub struct PushEvent {
 }
 
 pub fn detect_provider(headers: &HeaderMap) -> Option<Box<dyn GitProvider>> {
-    if headers.contains_key("X-Forgejo-Event") || headers.contains_key("X-Gitea-Event") {
+    // Detection order matters - check priority platforms first
+
+    // Check for Forgejo first (Codeberg uses Forgejo - priority platform)
+    if headers.contains_key("X-Forgejo-Event") {
         Some(Box::new(forgejo::ForgejoProvider))
-    } else {
+    }
+    // Check for Tangled (tangled.org - decentralized Git hosting on AT Protocol)
+    else if headers.contains_key("X-Tangled-Event") {
+        Some(Box::new(tangled::TangledProvider))
+    }
+    // No matching provider found
+    else {
         None
     }
 }

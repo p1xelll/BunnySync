@@ -1,20 +1,14 @@
-//! Forgejo webhook provider
+//! Tangled (tangled.org) webhook provider
 //!
-//! Forgejo is a self-hosted lightweight software forge.
-//! Webhook documentation: https://forgejo.org/docs/latest/user/webhooks/
+//! Tangled is a decentralized Git hosting platform using AT Protocol.
+//! Webhook documentation: https://docs.tangled.org/webhooks.html
 //!
 //! ## Key characteristics:
-//! - Event header: `X-Forgejo-Event` (e.g., "push")
-//! - Signature header: `X-Forgejo-Signature` with hex-encoded HMAC-SHA256
-//! - Algorithm: HMAC-SHA256
-//! - Signature format: Raw hex string (no prefix like "sha256=")
-//! - Delivery ID: `X-Forgejo-Delivery` (UUID)
-//! - Also sends backwards-compatible headers: `X-Gitea-Event`, `X-Gogs-Event`, `X-GitHub-Event`
-//!
-//! ## Note on Gitea compatibility:
-//! While Forgejo sends `X-Gitea-*` headers for backwards compatibility,
-//! this provider intentionally only uses `X-Forgejo-*` headers.
-//! Gitea will be implemented as a separate provider.
+//! - Event header: `X-Tangled-Event` (e.g., "push")
+//! - Signature header: `X-Tangled-Signature-256` with format `sha256=<hex>`
+//! - Algorithm: HMAC-SHA256 (same as Forgejo, different header format)
+//! - Delivery ID: `X-Tangled-Delivery` (UUID)
+//! - Uses DIDs (Decentralized Identifiers) for user identification
 
 use super::{GitProvider, PushEvent};
 use anyhow::{Context, Result, anyhow};
@@ -22,57 +16,63 @@ use axum::http::HeaderMap;
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 
-/// Forgejo webhook provider
+/// Tangled webhook provider
 ///
 /// Implements webhook signature verification and payload parsing
-/// for the Forgejo Git hosting platform (used by Codeberg).
-pub struct ForgejoProvider;
+/// for the Tangled Git hosting platform.
+pub struct TangledProvider;
 
 type HmacSha256 = Hmac<Sha256>;
 
-impl GitProvider for ForgejoProvider {
+impl GitProvider for TangledProvider {
     /// Verify webhook signature using HMAC-SHA256
     ///
     /// # Arguments
     /// * `payload` - Raw request body bytes
     /// * `headers` - HTTP headers from the request
-    /// * `secret` - Webhook secret configured in Forgejo
+    /// * `secret` - Webhook secret configured in Tangled
     ///
     /// # Returns
     /// * `Ok(String)` - The signature value for deduplication cache
     /// * `Err` - If signature is missing, malformed, or invalid
     ///
     /// # Signature Format
-    /// Forgejo sends signatures in raw hex format in the `X-Forgejo-Signature` header.
-    /// Unlike Tangled/GitHub, there is no "sha256=" prefix - just the hex string.
+    /// Tangled sends signatures in the format: `sha256=<hex>`
+    /// We strip the `sha256=` prefix and compare the hex value.
     fn verify_signature(
         &self,
         payload: &[u8],
         headers: &HeaderMap,
         secret: &str,
     ) -> Result<String> {
-        // Forgejo uses X-Forgejo-Signature header (HMAC-SHA256, hex encoded)
-        // Note: Gitea headers are intentionally NOT supported here - Gitea will be a separate provider
-        let signature = headers
-            .get("X-Forgejo-Signature")
-            .ok_or_else(|| anyhow!("missing X-Forgejo-Signature header"))?
+        // Extract X-Tangled-Signature-256 header
+        let signature_header = headers
+            .get("X-Tangled-Signature-256")
+            .ok_or_else(|| anyhow!("missing X-Tangled-Signature-256 header"))?
             .to_str()
             .context("invalid signature header encoding")?;
+
+        // Parse signature format: sha256=<hex>
+        // The prefix must be stripped before verification
+        let signature_value = signature_header
+            .strip_prefix("sha256=")
+            .ok_or_else(|| anyhow!("invalid signature format: expected sha256=<hex>"))?;
+
+        // Decode hex signature
+        let signature_bytes =
+            hex::decode(signature_value).context("invalid signature hex encoding")?;
 
         // Compute expected signature using HMAC-SHA256
         let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
             .map_err(|e| anyhow!("invalid secret: {}", e))?;
         mac.update(payload);
 
-        // Decode the hex signature from the header
-        let expected = hex::decode(signature).context("invalid signature hex encoding")?;
-
         // Constant-time comparison to prevent timing attacks
-        mac.verify_slice(&expected)
+        mac.verify_slice(&signature_bytes)
             .map_err(|_| anyhow!("signature verification failed"))?;
 
         // Return signature value for deduplication cache
-        Ok(signature.to_string())
+        Ok(signature_value.to_string())
     }
 
     /// Parse push event from webhook payload
@@ -85,11 +85,11 @@ impl GitProvider for ForgejoProvider {
     /// * `Err` - If payload is invalid JSON or missing required fields
     ///
     /// # Payload Structure
-    /// Forgejo push events include:
+    /// Tangled push events include:
     /// - `ref`: Git reference (e.g., "refs/heads/main")
     /// - `before`: Commit SHA before push
     /// - `after`: Commit SHA after push (the new commit)
-    /// - `pusher.username`: Username of the user who pushed
+    /// - `pusher.did`: DID of the user who pushed
     /// - `repository.clone_url`: URL for cloning the repository
     fn parse_push_event(&self, payload: &[u8]) -> Result<PushEvent> {
         let json: serde_json::Value =
@@ -112,8 +112,8 @@ impl GitProvider for ForgejoProvider {
             .ok_or_else(|| anyhow!("missing 'after' field in payload"))?;
 
         // Detect test webhook: before and after are the same and not empty
-        // This happens when testing the webhook in Forgejo UI
-        let is_test = before == after && !before.is_empty();
+        // This happens when testing the webhook in Tangled UI
+        let is_test = !before.is_empty() && before == after;
 
         Ok(PushEvent {
             ref_name,
@@ -130,13 +130,13 @@ mod tests {
 
     fn create_test_headers(signature: &str) -> HeaderMap {
         let mut headers = HeaderMap::new();
-        headers.insert("X-Forgejo-Event", HeaderValue::from_static("push"));
+        headers.insert("X-Tangled-Event", HeaderValue::from_static("push"));
         headers.insert(
-            "X-Forgejo-Signature",
-            HeaderValue::from_str(signature).unwrap(),
+            "X-Tangled-Signature-256",
+            HeaderValue::from_str(&format!("sha256={}", signature)).unwrap(),
         );
         headers.insert(
-            "X-Forgejo-Delivery",
+            "X-Tangled-Delivery",
             HeaderValue::from_static("test-delivery-id"),
         );
         headers
@@ -144,7 +144,7 @@ mod tests {
 
     #[test]
     fn test_verify_signature_valid() {
-        let provider = ForgejoProvider;
+        let provider = TangledProvider;
         let secret = "test-secret-min-32-characters-long";
         let payload = br#"{"ref":"refs/heads/main","before":"abc123","after":"def456"}"#;
 
@@ -162,7 +162,7 @@ mod tests {
 
     #[test]
     fn test_verify_signature_invalid() {
-        let provider = ForgejoProvider;
+        let provider = TangledProvider;
         let secret = "test-secret-min-32-characters-long";
         let payload = br#"{"ref":"refs/heads/main"}"#;
 
@@ -174,7 +174,7 @@ mod tests {
 
     #[test]
     fn test_verify_signature_missing_header() {
-        let provider = ForgejoProvider;
+        let provider = TangledProvider;
         let secret = "test-secret";
         let payload = br#"{}"#;
 
@@ -186,27 +186,44 @@ mod tests {
     }
 
     #[test]
+    fn test_verify_signature_wrong_prefix() {
+        let provider = TangledProvider;
+        let secret = "test-secret";
+        let payload = br#"{}"#;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "X-Tangled-Signature-256",
+            HeaderValue::from_static("invalid-prefix-abc123"),
+        );
+
+        let result = provider.verify_signature(payload, &headers, secret);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("sha256="));
+    }
+
+    #[test]
     fn test_parse_push_event_valid() {
-        let provider = ForgejoProvider;
+        let provider = TangledProvider;
         let payload = br#"
             {
                 "ref": "refs/heads/main",
-                "before": "28e1879d029cb852e4844d9c718537df08844e03",
-                "after": "bffeb74224043ba2feb48d137756c8a9331c449a",
-                "pusher": {"username": "forgejo"},
-                "repository": {"clone_url": "http://localhost:3000/forgejo/webhooks"}
+                "before": "c04ddf64eddc90e4e2a9846ba3b43e67a0e2865e",
+                "after": "7b320e5cbee2734071e4310c1d9ae401d8f6cab5",
+                "pusher": {"did": "did:plc:hwevmowznbiukdf6uk5dwrrq"},
+                "repository": {"clone_url": "https://tangled.org/did:plc:test/repo"}
             }
         "#;
 
         let event = provider.parse_push_event(payload).unwrap();
         assert_eq!(event.ref_name, "refs/heads/main");
-        assert_eq!(event.commit, "bffeb74224043ba2feb48d137756c8a9331c449a");
+        assert_eq!(event.commit, "7b320e5cbee2734071e4310c1d9ae401d8f6cab5");
         assert!(!event.is_test);
     }
 
     #[test]
     fn test_parse_push_event_test_webhook() {
-        let provider = ForgejoProvider;
+        let provider = TangledProvider;
         let payload = br#"
             {
                 "ref": "refs/heads/main",
@@ -221,7 +238,7 @@ mod tests {
 
     #[test]
     fn test_parse_push_event_missing_ref() {
-        let provider = ForgejoProvider;
+        let provider = TangledProvider;
         let payload = br#"{"after": "abc123"}"#;
 
         let result = provider.parse_push_event(payload);
@@ -231,7 +248,7 @@ mod tests {
 
     #[test]
     fn test_parse_push_event_missing_after() {
-        let provider = ForgejoProvider;
+        let provider = TangledProvider;
         let payload = br#"{"ref": "refs/heads/main"}"#;
 
         let result = provider.parse_push_event(payload);
