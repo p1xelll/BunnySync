@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use reqwest::Client;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -52,7 +52,8 @@ impl BunnyStorage {
             .context("failed to list files")?;
 
         if response.status().is_success() {
-            let files: Vec<FileInfo> = response.json().await.context("failed to parse file list")?;
+            let files: Vec<FileInfo> =
+                response.json().await.context("failed to parse file list")?;
             let mut map = HashMap::new();
             for file in files {
                 if let Some(checksum) = file.checksum {
@@ -63,10 +64,7 @@ impl BunnyStorage {
         } else if response.status().as_u16() == 404 {
             Ok(HashMap::new())
         } else {
-            Err(anyhow!(
-                "failed to list files: {}",
-                response.status()
-            ))
+            Err(anyhow!("failed to list files: {}", response.status()))
         }
     }
 
@@ -74,8 +72,7 @@ impl BunnyStorage {
         let encoded_path = urlencoding::encode(remote_path);
         let url = format!(
             "https://storage.bunnycdn.com/{}/{}",
-            self.storage_zone,
-            encoded_path
+            self.storage_zone, encoded_path
         );
 
         let response = self
@@ -90,10 +87,7 @@ impl BunnyStorage {
         if response.status().is_success() {
             Ok(())
         } else {
-            Err(anyhow!(
-                "failed to upload file: {}",
-                response.status()
-            ))
+            Err(anyhow!("failed to upload file: {}", response.status()))
         }
     }
 
@@ -101,8 +95,7 @@ impl BunnyStorage {
         let encoded_path = urlencoding::encode(remote_path);
         let url = format!(
             "https://storage.bunnycdn.com/{}/{}",
-            self.storage_zone,
-            encoded_path
+            self.storage_zone, encoded_path
         );
 
         let response = self
@@ -116,10 +109,7 @@ impl BunnyStorage {
         if response.status().is_success() {
             Ok(())
         } else {
-            Err(anyhow!(
-                "failed to delete file: {}",
-                response.status()
-            ))
+            Err(anyhow!("failed to delete file: {}", response.status()))
         }
     }
 }

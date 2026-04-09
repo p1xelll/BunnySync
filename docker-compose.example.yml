@@ -1,6 +1,6 @@
 services:
-  bunny-deploy:
-    image: p1xel/bunny-deploy:latest
+  bunnysync:
+    image: p1xel/bunnysync:latest
     build: .
     ports:
       - "3000:3000"

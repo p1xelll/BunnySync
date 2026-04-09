@@ -1,4 +1,4 @@
-# bunny-deploy
+# BunnySync
 
 Self-hosted webhook server that syncs static sites to Bunny Storage on push. Written in Rust, deployable anywhere Docker runs. Fully stateless — no database, no registration. Supports multiple projects per instance.
 
@@ -28,7 +28,7 @@ POST /hook/blog
        │  X-Forgejo-Signature: sha256={hmac}
        ▼
 ┌──────────────────────────────────────────┐
-│               bunny-deploy                │
+│               BunnySync                │
 │                                           │
 │  1. extract project_id from URL           │
 │  2. lookup in-memory HashMap              │
@@ -316,7 +316,7 @@ PROJECT_DOCS_BUNNY_API_KEY=account-b-api-key
 ## Project structure
 
 ```
-bunny-deploy/
+bunnysync/
 ├── src/
 │   ├── providers/
 │   │   ├── mod.rs          -- GitProvider trait + auto-detect by headers
@@ -375,8 +375,8 @@ Estimated cost at 30 webhooks/day: **~$0.27/month**.
 
 ```yaml
 services:
-  bunny-deploy:
-    image: p1xel/bunny-deploy:latest
+  bunnysync:
+    image: p1xel/bunnysync:latest
     ports:
       - "3000:3000"
     environment:
@@ -403,7 +403,7 @@ docker run -d \
   -e PROJECT_FILMLOG_BUNNY_STORAGE_PASSWORD=xxx \
   -e PROJECT_FILMLOG_BUNNY_PULL_ZONE_ID=5651817 \
   --restart unless-stopped \
-  p1xel/bunny-deploy:latest
+  p1xel/bunnysync:latest
 ```
 
 ---

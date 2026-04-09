@@ -1,5 +1,5 @@
 use super::{GitProvider, PushEvent};
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use axum::http::HeaderMap;
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;

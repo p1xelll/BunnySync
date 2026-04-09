@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use reqwest::Client;
 
 #[derive(Clone)]
@@ -30,10 +30,7 @@ impl BunnyCdn {
         if response.status().is_success() {
             Ok(())
         } else {
-            Err(anyhow!(
-                "failed to purge URL: {}",
-                response.status()
-            ))
+            Err(anyhow!("failed to purge URL: {}", response.status()))
         }
     }
 

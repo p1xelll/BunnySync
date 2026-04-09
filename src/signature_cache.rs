@@ -54,11 +54,10 @@ impl SignatureCache {
                 let mut state = inner.write().await;
 
                 let cutoff = now - ttl;
-                let split_idx = state
-                    .entries
-                    .partition_point(|(_, time)| *time <= cutoff);
+                let split_idx = state.entries.partition_point(|(_, time)| *time <= cutoff);
 
-                let expired: Vec<String> = state.entries.drain(..split_idx).map(|(s, _)| s).collect();
+                let expired: Vec<String> =
+                    state.entries.drain(..split_idx).map(|(s, _)| s).collect();
                 for sig in expired {
                     state.signatures.remove(&sig);
                 }

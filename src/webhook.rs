@@ -7,11 +7,11 @@ use crate::providers::detect_provider;
 use crate::signature_cache::SignatureCache;
 use anyhow::{Context, Result};
 use axum::{
+    Router,
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
     routing::{get, post},
-    Router,
 };
 use git2::{FetchOptions, Repository};
 use std::collections::HashMap;
@@ -40,7 +40,7 @@ pub fn create_router(config: Arc<crate::config::Config>) -> Router {
 
     Router::new()
         .route("/health", get(health_handler))
-        .route("/hook/:project_id", post(handle_webhook))
+        .route("/hook/{project_id}", post(handle_webhook))
         .with_state(state)
 }
 
@@ -153,11 +153,17 @@ async fn handle_webhook(
     (StatusCode::OK, "deployed")
 }
 
-async fn deploy_project(project: &ProjectConfig, push_event: &crate::providers::PushEvent) -> Result<()> {
+async fn deploy_project(
+    project: &ProjectConfig,
+    push_event: &crate::providers::PushEvent,
+) -> Result<()> {
     let temp_dir = TempDir::new().context("failed to create temp directory")?;
     let repo_path = temp_dir.path().join("repo");
 
-    let branch = push_event.ref_name.strip_prefix("refs/heads/").unwrap_or(&push_event.ref_name);
+    let branch = push_event
+        .ref_name
+        .strip_prefix("refs/heads/")
+        .unwrap_or(&push_event.ref_name);
     clone_repo(&project.repo_url, &repo_path, branch).await?;
 
     let local_files = collect_local_files(&repo_path).await?;
@@ -208,9 +214,7 @@ async fn deploy_project(project: &ProjectConfig, push_event: &crate::providers::
     for delta in deletions {
         let storage = storage.clone();
         let path = delta.path.clone();
-        delete_tasks.spawn(async move {
-            storage.delete_file(&path).await
-        });
+        delete_tasks.spawn(async move { storage.delete_file(&path).await });
     }
 
     while let Some(result) = delete_tasks.join_next().await {
@@ -267,7 +271,8 @@ async fn upload_with_retry(
                 last_error = Some(e);
 
                 if attempt < max_retries {
-                    tokio::time::sleep(std::time::Duration::from_millis(100 * attempt as u64)).await;
+                    tokio::time::sleep(std::time::Duration::from_millis(100 * attempt as u64))
+                        .await;
                 }
             }
         }

@@ -1,4 +1,4 @@
-# Woodpecker CI pipeline for bunny-deploy
+# Woodpecker CI pipeline for bunnysync
 # Builds and pushes Docker image using cargo-chef for caching
 
 when:
