@@ -1,5 +1,5 @@
 # Woodpecker CI pipeline for bunnysync
-# Builds and pushes Docker image using cargo-chef for caching
+# Builds multi-arch Docker images (amd64 + arm64) with manifest lists
 
 when:
   - event: push
@@ -8,54 +8,21 @@ when:
     branch: main
   - event: tag
 
+variables:
+  - &registry codeberg.org
+  - &repo "codeberg.org/${CI_REPO_OWNER}/${CI_REPO_NAME}"
+
 steps:
-  # Build Docker image with cargo-chef
-  build-and-push:
-    image: woodpeckerci/plugin-docker-buildx
-    settings:
-      repo: ${CI_REPO_OWNER}/${CI_REPO_NAME}
-      tags:
-        - latest
-        - ${CI_COMMIT_SHA:0:8}
-      dockerfile: Dockerfile
-      context: .
-      build_args:
-        - BUILDKIT_INLINE_CACHE=1
-      # Enable BuildKit for optimal layer caching
-      buildkit: true
-      # Cache from registry for faster builds
-      cache_from: ${CI_REPO_OWNER}/${CI_REPO_NAME}:latest
-    secrets:
-      - source: docker_username
-        target: plugin_username
-      - source: docker_password
-        target: plugin_password
-    when:
-      - event: [push, tag]
+  # === QUALITY CHECKS (run first for fast feedback) ===
 
-  # Build only for PRs (don't push)
-  build-pr:
-    image: woodpeckerci/plugin-docker-buildx
-    settings:
-      repo: ${CI_REPO_OWNER}/${CI_REPO_NAME}
-      dockerfile: Dockerfile
-      context: .
-      dry_run: true
-      build_args:
-        - BUILDKIT_INLINE_CACHE=1
-      buildkit: true
-      cache_from: ${CI_REPO_OWNER}/${CI_REPO_NAME}:latest
-    when:
-      - event: pull_request
-
-  # Run tests
-  test:
+  # Check formatting
+  fmt:
     image: rust:1.85-slim-bookworm
     commands:
-      - apt-get update && apt-get install -y pkg-config libssl-dev cmake git
-      - cargo test --release
+      - rustup component add rustfmt
+      - cargo fmt --check
     when:
-      - event: [push, pull_request]
+      - event: [push, pull_request, tag]
 
   # Lint with clippy
   lint:
@@ -65,34 +32,124 @@ steps:
       - rustup component add clippy
       - cargo clippy -- -D warnings
     when:
-      - event: [push, pull_request]
+      - event: [push, pull_request, tag]
+    depends_on: [fmt]
 
-  # Check formatting
-  fmt:
+  # Run tests
+  test:
     image: rust:1.85-slim-bookworm
     commands:
-      - rustup component add rustfmt
-      - cargo fmt --check
+      - apt-get update && apt-get install -y pkg-config libssl-dev cmake git
+      - cargo test --release
     when:
-      - event: [push, pull_request]
+      - event: [push, pull_request, tag]
+    depends_on: [lint]
 
-  # Tag release builds
-  tag-release:
+  # === PR BUILDS (dry run, no push) ===
+
+  build-pr:
     image: woodpeckerci/plugin-docker-buildx
+    privileged: true
     settings:
       repo: ${CI_REPO_OWNER}/${CI_REPO_NAME}
-      tags:
-        - ${CI_COMMIT_TAG}
-        - ${CI_COMMIT_TAG%.*}
-        - ${CI_COMMIT_TAG%%.*}
-        - latest
       dockerfile: Dockerfile
       context: .
+      platforms: linux/amd64,linux/arm64
+      dry_run: true
       buildkit: true
-    secrets:
-      - source: docker_username
-        target: plugin_username
-      - source: docker_password
-        target: plugin_password
+    when:
+      - event: pull_request
+    depends_on: [test]
+
+  # === PRODUCTION BUILDS ===
+
+  build-amd64:
+    image: woodpeckerci/plugin-docker-buildx
+    privileged: true
+    settings:
+      repo: *repo
+      dockerfile: Dockerfile
+      context: .
+      platforms: linux/amd64
+      tag: ${CI_COMMIT_SHA:0:8}-amd64
+      buildkit: true
+      build_args:
+        - BUILDKIT_INLINE_CACHE=1
+      username:
+        from_secret: docker_username
+      password:
+        from_secret: docker_password
+    when:
+      - event: [push, tag]
+    depends_on: [test]
+
+  build-arm64:
+    image: woodpeckerci/plugin-docker-buildx
+    privileged: true
+    settings:
+      repo: *repo
+      dockerfile: Dockerfile
+      context: .
+      platforms: linux/arm64
+      tag: ${CI_COMMIT_SHA:0:8}-arm64
+      buildkit: true
+      build_args:
+        - BUILDKIT_INLINE_CACHE=1
+      username:
+        from_secret: docker_username
+      password:
+        from_secret: docker_password
+    when:
+      - event: [push, tag]
+    depends_on: [test]
+
+  # === MANIFEST LISTS ===
+
+  manifest-sha:
+    image: woodpeckerci/plugin-docker-buildx
+    privileged: true
+    settings:
+      repo: *repo
+      tag: ${CI_COMMIT_SHA:0:8}
+      platforms: linux/amd64,linux/arm64
+      manifest: true
+      username:
+        from_secret: docker_username
+      password:
+        from_secret: docker_password
+    when:
+      - event: [push, tag]
+    depends_on: [build-amd64, build-arm64]
+
+  manifest-latest:
+    image: woodpeckerci/plugin-docker-buildx
+    privileged: true
+    settings:
+      repo: *repo
+      tag: latest
+      platforms: linux/amd64,linux/arm64
+      manifest: true
+      username:
+        from_secret: docker_username
+      password:
+        from_secret: docker_password
+    when:
+      - event: push
+        branch: main
+    depends_on: [build-amd64, build-arm64]
+
+  manifest-version:
+    image: woodpeckerci/plugin-docker-buildx
+    privileged: true
+    settings:
+      repo: *repo
+      tag: ${CI_COMMIT_TAG}
+      platforms: linux/amd64,linux/arm64
+      manifest: true
+      username:
+        from_secret: docker_username
+      password:
+        from_secret: docker_password
     when:
       - event: tag
+    depends_on: [build-amd64, build-arm64]

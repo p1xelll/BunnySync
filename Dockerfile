@@ -1,6 +1,7 @@
 # Stage 1: Install cargo-chef
-FROM rust:1.85-slim-bookworm AS chef
-RUN cargo install cargo-chef
+FROM rust:1-slim-bookworm AS chef
+RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
+RUN cargo install cargo-chef --locked
 
 # Stage 2: Prepare the recipe (dependency manifest)
 FROM chef AS planner
