@@ -58,11 +58,8 @@ impl SignatureCache {
                 let split_idx = state.entries.partition_point(|(_, time)| *time <= cutoff);
 
                 if split_idx > 0 {
-                    let expired: Vec<Arc<str>> = state
-                        .entries
-                        .drain(..split_idx)
-                        .map(|(s, _)| s)
-                        .collect();
+                    let expired: Vec<Arc<str>> =
+                        state.entries.drain(..split_idx).map(|(s, _)| s).collect();
                     for sig in expired {
                         state.signatures.remove(sig.as_ref());
                     }

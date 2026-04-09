@@ -1,10 +1,10 @@
 # BunnySync
 
-A high-performance webhook receiver that automatically deploys Git repositories to BunnyCDN Storage zones. Supports Forgejo/Gitea webhooks with automatic CDN cache purging.
+A webhook receiver that automatically deploys Git repositories to BunnyCDN Storage zones. Supports Forgejo webhooks with automatic CDN cache purging.
 
 ## Features
 
-- **Webhook Support**: Receives push events from Forgejo/Gitea
+- **Webhook Support**: Receives push events from Forgejo
 - **Automatic Deployments**: Clones repo, computes delta, uploads changed files
 - **CDN Integration**: Automatically purges BunnyCDN cache for modified files
 - **Multi-Architecture**: Docker images available for AMD64 and ARM64
@@ -104,7 +104,7 @@ WEBSITE_STORAGE_PASSWORD=your-storage-zone-password
 
 ```bash
 # Download compose file
-wget https://raw.githubusercontent.com/yourusername/bunnysync/main/docker-compose.yml
+wget https://codeberg.org/p1xel/BunnySync/raw/branch/main/docker-compose.yml
 
 # Create environment file
 cp .env.example .env
@@ -162,10 +162,10 @@ PROJECT_SHOP_BUNNY_PULL_ZONE_ID=222222
 PROJECT_SHOP_BUNNY_PULL_ZONE_DOMAIN=shop.example.com
 ```
 
-## Webhook Setup (Forgejo/Gitea)
+## Webhook Setup (Forgejo)
 
 1. Go to your repository → Settings → Webhooks
-2. Add a new Gitea webhook
+2. Add a new Forgejo webhook
 3. Target URL: `http://your-server:3000/hook/{PROJECT_ID}`
    - Example: `http://bunnysync.example.com:3000/hook/MYAPP`
 4. HTTP Method: `POST`
@@ -219,19 +219,166 @@ The application is built with:
 - Streaming file reads with 64KB buffers
 - Efficient delta computation using SHA-256 checksums
 
+## Adding a New Provider
+
+BunnySync uses a provider system to support different Git hosting platforms. Currently supported:
+- **Forgejo** / **Gitea**
+
+To add a new provider:
+
+### 1. Fork and clone
+
+```bash
+# Fork the repository on Codeberg first, then clone your fork
+git clone https://codeberg.org/p1xel/BunnySync.git
+cd bunnysync
+```
+
+### 2. Create the provider file
+
+Create a new file in `src/providers/{provider_name}.rs` implementing the `GitProvider` trait:
+
+```rust
+use super::{GitProvider, PushEvent};
+use anyhow::{Context, Result, anyhow};
+use axum::http::HeaderMap;
+
+pub struct MyProvider;
+
+impl GitProvider for MyProvider {
+    fn verify_signature(
+        &self,
+        payload: &[u8],
+        headers: &HeaderMap,
+        secret: &str,
+    ) -> Result<String> {
+        // Extract signature from headers
+        let signature = headers
+            .get("X-MyProvider-Signature")
+            .ok_or_else(|| anyhow!("missing signature header"))?
+            .to_str()
+            .context("invalid signature header")?;
+
+        // Verify HMAC-SHA256 signature
+        use hmac::{Hmac, KeyInit, Mac};
+        use sha2::Sha256;
+
+        type HmacSha256 = Hmac<Sha256>;
+        let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
+            .map_err(|e| anyhow!("invalid secret: {}", e))?;
+        mac.update(payload);
+
+        let expected = hex::decode(signature).context("invalid signature hex")?;
+
+        mac.verify_slice(&expected)
+            .map_err(|_| anyhow!("signature verification failed"))?;
+
+        Ok(signature.to_string())
+    }
+
+    fn parse_push_event(&self, payload: &[u8]) -> Result<PushEvent> {
+        let json: serde_json::Value = serde_json::from_slice(payload)
+            .context("invalid JSON")?;
+
+        let ref_name = json
+            .get("ref")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("missing ref"))?
+            .to_string();
+
+        let before = json.get("before").and_then(|v| v.as_str()).unwrap_or("");
+
+        let after = json
+            .get("after")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+
+        // Detect test webhook: before and after are the same
+        let is_test = before == after && !before.is_empty();
+
+        Ok(PushEvent {
+            ref_name,
+            commit: after.to_string(),
+            is_test,
+        })
+    }
+}
+```
+
+### 3. Register the provider
+
+Update `src/providers/mod.rs` to add your provider:
+
+```rust
+pub mod forgejo;
+pub mod myprovider;  // Add this line
+
+pub fn detect_provider(headers: &HeaderMap) -> Option<Box<dyn GitProvider>> {
+    if headers.contains_key("X-Forgejo-Event") || headers.contains_key("X-Gitea-Event") {
+        Some(Box::new(forgejo::ForgejoProvider))
+    } else if headers.contains_key("X-MyProvider-Event") {  // Add this
+        Some(Box::new(myprovider::MyProvider))
+    } else {
+        None
+    }
+}
+```
+
+### 4. Test your provider
+
+1. Build and run locally: `cargo run --release`
+2. Add a webhook in your Git hosting platform
+3. Point it to `http://localhost:3000/hook/{PROJECT_ID}`
+4. Trigger a push event
+
+### 5. Submit your changes
+
+Once your provider is working:
+
+1. **Run tests and linting**:
+   ```bash
+   cargo test
+   cargo clippy -- -D warnings
+   cargo fmt
+   ```
+2. **Push to your fork**:
+   ```bash
+   git add .
+   git commit -m "Add MyProvider support"
+   git push origin main
+   ```
+3. **Create a pull request** with:
+   - Description of the Git platform supported
+   - Link to webhook documentation
+   - Any special configuration notes
+
 ## Building from Source
 
+> **Note:** These requirements are only needed when building from source. Docker users don't need to install anything.
+
 ### Requirements
-- Rust 1.85+
-- OpenSSL development libraries
-- CMake
-- Git
+
+- **Rust** 1.85+ (for the application)
+- **CMake** (required by the `git2` crate to compile libgit2)
+- **OpenSSL** development libraries (`libssl-dev` on Debian/Ubuntu)
+- **pkg-config** (to locate system libraries)
+- **Git** (for repository operations)
+
+On Debian/Ubuntu:
+```bash
+sudo apt-get update && sudo apt-get install -y cmake libssl-dev pkg-config git
+```
+
+On macOS:
+```bash
+brew install cmake openssl pkg-config git
+```
 
 ### Build
 
 ```bash
 # Clone repository
-git clone https://github.com/yourusername/bunnysync.git
+git clone https://codeberg.org/p1xel/BunnySync.git
 cd bunnysync
 
 # Build release binary
@@ -285,5 +432,4 @@ MIT License - see LICENSE file for details
 
 ## Support
 
-- Issues: https://github.com/yourusername/bunnysync/issues
-- Discussions: https://github.com/yourusername/bunnysync/discussions
+- Issues: https://codeberg.org/p1xel/BunnySync/issues

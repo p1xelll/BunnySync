@@ -61,7 +61,8 @@ impl BunnyCdn {
         let semaphore = Arc::new(Semaphore::new(concurrency));
         let mut tasks = JoinSet::new();
 
-        for url in urls.iter().cloned() {
+        for url in urls {
+            let url = url.clone();
             let cdn = self.clone();
             let permit = Arc::clone(&semaphore);
 

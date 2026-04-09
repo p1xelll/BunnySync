@@ -392,7 +392,9 @@ async fn deploy_project(
             .unwrap_or_else(|| api_key.clone());
 
         let cdn = BunnyCdn::new(api_key);
-        let results = cdn.purge_urls_parallel(&purge_urls, PURGE_CONCURRENCY).await;
+        let results = cdn
+            .purge_urls_parallel(&purge_urls, PURGE_CONCURRENCY)
+            .await;
 
         for (url, result) in results {
             if let Err(e) = result {
@@ -516,9 +518,7 @@ async fn collect_local_files(dir: &std::path::Path) -> Result<LocalFileSet> {
 }
 
 async fn compute_file_checksum(path: &std::path::Path) -> Result<String> {
-    let mut file = fs::File::open(path)
-        .await
-        .context("failed to open file")?;
+    let mut file = fs::File::open(path).await.context("failed to open file")?;
 
     let mut hasher = Sha256::new();
     let mut buffer = vec![0u8; BUFFER_SIZE];
