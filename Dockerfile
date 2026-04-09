@@ -1,53 +1,47 @@
-# Stage 1: Install cargo-chef
-FROM rust:1-slim-bookworm AS chef
-RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
-RUN cargo install cargo-chef --locked
-
-# Stage 2: Prepare the recipe (dependency manifest)
-FROM chef AS planner
-WORKDIR /app
-COPY Cargo.toml Cargo.lock ./
-COPY src ./src
-RUN cargo chef prepare --recipe-path recipe.json
-
-# Stage 3: Build dependencies (cached layer)
-FROM chef AS builder
-WORKDIR /app
+# Stage 1: Build the application using Alpine (musl) for true static linking
+FROM rust:1-alpine AS builder
 
 # Install build dependencies
-RUN apt-get update && apt-get install -y \
-    pkg-config \
-    libssl-dev \
+RUN apk add --no-cache \
+    musl-dev \
+    openssl-dev \
+    openssl-libs-static \
+    libssh2-static \
+    zlib-static \
+    pkgconfig \
     cmake \
     git \
-    && rm -rf /var/lib/apt/lists/*
-
-# Copy only the recipe - this layer is cached unless dependencies change
-COPY --from=planner /app/recipe.json recipe.json
-RUN cargo chef cook --release --recipe-path recipe.json
-
-# Stage 4: Build the actual project
-# This layer only rebuilds when source code changes
-COPY Cargo.toml Cargo.lock ./
-COPY src ./src
-RUN cargo build --release
-
-# Stage 5: Runtime stage
-FROM debian:bookworm-slim
-
-RUN apt-get update && apt-get install -y \
-    ca-certificates \
-    git \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN useradd -m -u 1000 appuser
+    perl \
+    make \
+    gcc \
+    g++ \
+    linux-headers
 
 WORKDIR /app
 
-COPY --from=builder /app/target/release/bunnysync /usr/local/bin/bunnysync
+# Copy Cargo files first for better caching
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
 
-USER appuser
+# Set environment for static OpenSSL linking
+ENV OPENSSL_STATIC=1
+ENV OPENSSL_DIR=/usr
+ENV PKG_CONFIG_ALLOW_STATIC=1
+ENV PKG_CONFIG_ALL_STATIC=1
+
+# Build for the native target (musl is static by default on Alpine)
+RUN cargo build --release && \
+    cp /app/target/release/bunnysync /app/bunnysync
+
+# Stage 2: Runtime stage
+FROM gcr.io/distroless/static-debian12:nonroot
+
+WORKDIR /app
+
+COPY --from=builder /app/bunnysync /bunnysync
+
+USER nonroot:nonroot
 
 EXPOSE 3000
 
-ENTRYPOINT ["bunnysync"]
+ENTRYPOINT ["/bunnysync"]
