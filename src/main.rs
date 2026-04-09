@@ -4,6 +4,7 @@ mod deploy_queue;
 mod diff;
 mod providers;
 mod signature_cache;
+mod types;
 mod webhook;
 
 use std::sync::Arc;
@@ -20,8 +21,6 @@ async fn main() {
             std::process::exit(1);
         }
     };
-
-    config.validate_and_print();
 
     let app = webhook::create_router(config.clone());
 

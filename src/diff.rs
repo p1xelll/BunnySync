@@ -5,6 +5,7 @@ pub enum FileAction {
     Skip,
     Upload,
     Delete,
+    DeleteDir,
 }
 
 #[derive(Debug, Clone)]
@@ -19,9 +20,12 @@ pub struct FileDelta {
 pub fn compute_delta(
     local_files: &HashMap<String, String>,
     remote_files: &HashMap<String, String>,
+    local_dirs: &[String],
+    remote_dirs: &[String],
 ) -> Vec<FileDelta> {
     let mut deltas = Vec::new();
 
+    // Process files
     for (path, local_checksum) in local_files {
         let remote_checksum = remote_files.get(path);
         let action = match remote_checksum {
@@ -45,6 +49,31 @@ pub fn compute_delta(
                 local_checksum: None,
                 remote_checksum: Some(remote_checksum.clone()),
             });
+        }
+    }
+
+    // Process directories - only delete directories that exist remotely but not locally
+    // Convert local_dirs to a HashSet for O(1) lookups
+    let local_dirs_set: std::collections::HashSet<_> = local_dirs.iter().collect();
+
+    for dir_path in remote_dirs {
+        if !local_dirs_set.contains(dir_path) {
+            // Check if any file in this directory is being uploaded (which would mean we're recreating it)
+            let dir_prefix = if dir_path.ends_with('/') {
+                dir_path.clone()
+            } else {
+                format!("{}/", dir_path)
+            };
+            let has_files_being_uploaded = local_files.keys().any(|f| f.starts_with(&dir_prefix));
+
+            if !has_files_being_uploaded {
+                deltas.push(FileDelta {
+                    path: dir_path.clone(),
+                    action: FileAction::DeleteDir,
+                    local_checksum: None,
+                    remote_checksum: None,
+                });
+            }
         }
     }
 
@@ -79,6 +108,13 @@ pub fn get_deletions(deltas: &[FileDelta]) -> Vec<&FileDelta> {
     deltas
         .iter()
         .filter(|d| matches!(d.action, FileAction::Delete))
+        .collect()
+}
+
+pub fn get_dir_deletions(deltas: &[FileDelta]) -> Vec<&FileDelta> {
+    deltas
+        .iter()
+        .filter(|d| matches!(d.action, FileAction::DeleteDir))
         .collect()
 }
 

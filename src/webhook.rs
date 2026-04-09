@@ -3,7 +3,7 @@ use crate::bunny::storage::BunnyStorage;
 use crate::config::ProjectConfig;
 use crate::deploy_queue::DeployQueue;
 use crate::diff::{
-    compute_delta, count_modified, get_deletions, get_purge_urls, get_skips, get_uploads,
+    compute_delta, count_modified, get_deletions, get_dir_deletions, get_purge_urls, get_skips, get_uploads,
 };
 use crate::providers::detect_provider;
 use crate::signature_cache::SignatureCache;
@@ -36,6 +36,8 @@ struct DeployResponse {
     modified: usize,
     purged: usize,
     skipped: usize,
+    #[serde(rename = "dirs_deleted")]
+    dirs_deleted: usize,
 }
 
 impl DeployResponse {
@@ -45,6 +47,7 @@ impl DeployResponse {
         modified: usize,
         purged: usize,
         skipped: usize,
+        dirs_deleted: usize,
     ) -> Self {
         Self {
             status: "deployed".to_string(),
@@ -53,6 +56,7 @@ impl DeployResponse {
             modified,
             purged,
             skipped,
+            dirs_deleted,
         }
     }
 }
@@ -232,6 +236,7 @@ async fn handle_webhook(
                 modified = stats.modified,
                 purged = stats.purged,
                 skipped = stats.skipped,
+                dirs_deleted = stats.dirs_deleted,
                 "deploy completed successfully"
             );
             let response = DeployResponse::success(
@@ -240,6 +245,7 @@ async fn handle_webhook(
                 stats.modified,
                 stats.purged,
                 stats.skipped,
+                stats.dirs_deleted,
             );
             (StatusCode::OK, Json(response)).into_response()
         }
@@ -262,7 +268,10 @@ struct DeployStats {
     modified: usize,
     purged: usize,
     skipped: usize,
+    dirs_deleted: usize,
 }
+
+use crate::types::LocalFileSet;
 
 async fn deploy_project(
     project: &ProjectConfig,
@@ -290,13 +299,15 @@ async fn deploy_project(
     // Debug: Log file counts and sample checksums
     debug!(
         event = "deploy.file_counts",
-        local_count = local_files.len(),
-        remote_count = remote_files.len(),
+        local_count = local_files.files.len(),
+        remote_count = remote_files.files.len(),
+        local_dirs = local_files.directories.len(),
+        remote_dirs = remote_files.directories.len(),
         "local vs remote file counts"
     );
 
     // Log first 5 local files with checksums
-    for (i, (path, checksum)) in local_files.iter().take(5).enumerate() {
+    for (i, (path, checksum)) in local_files.files.iter().take(5).enumerate() {
         debug!(
             event = "deploy.local_file_sample",
             index = i,
@@ -307,7 +318,7 @@ async fn deploy_project(
     }
 
     // Log first 5 remote files with checksums
-    for (i, (path, checksum)) in remote_files.iter().take(5).enumerate() {
+    for (i, (path, checksum)) in remote_files.files.iter().take(5).enumerate() {
         debug!(
             event = "deploy.remote_file_sample",
             index = i,
@@ -317,7 +328,7 @@ async fn deploy_project(
         );
     }
 
-    let deltas = compute_delta(&local_files, &remote_files);
+    let deltas = compute_delta(&local_files.files, &remote_files.files, &local_files.directories, &remote_files.directories);
 
     // Calculate stats before consuming the vectors
     let uploaded_count = get_uploads(&deltas).len();
@@ -328,12 +339,18 @@ async fn deploy_project(
     let uploads = get_uploads(&deltas);
     let deletions = get_deletions(&deltas);
 
+    let dir_deletions = get_dir_deletions(&deltas);
+    let dir_deletion_count = dir_deletions.len();
+
     info!(
         event = "delta.computed",
-        local_files = local_files.len(),
-        remote_files = remote_files.len(),
+        local_files = local_files.files.len(),
+        remote_files = remote_files.files.len(),
+        local_dirs = local_files.directories.len(),
+        remote_dirs = remote_files.directories.len(),
         uploads = uploaded_count,
         deletions = deleted_count,
+        dir_deletions = dir_deletion_count,
         modified = modified_count,
         skipped = skipped_count,
         "delta computed"
@@ -373,6 +390,42 @@ async fn deploy_project(
         result??;
     }
 
+    // Delete empty directories after all files are deleted
+    // Sort directories by depth (deepest first) to avoid "not empty" errors
+    let mut dir_deletions_sorted: Vec<_> = dir_deletions.iter().map(|d| d.path.clone()).collect();
+    dir_deletions_sorted.sort_by(|a, b| {
+        let a_depth = a.matches('/').count();
+        let b_depth = b.matches('/').count();
+        b_depth.cmp(&a_depth) // Reverse order: deepest first
+    });
+
+    let mut dir_delete_tasks = JoinSet::new();
+    for dir_path in dir_deletions_sorted {
+        let storage = storage.clone();
+        dir_delete_tasks.spawn(async move { storage.delete_directory(&dir_path).await });
+    }
+
+    let mut successful_dir_deletions = 0;
+    while let Some(result) = dir_delete_tasks.join_next().await {
+        match result {
+            Ok(Ok(())) => successful_dir_deletions += 1,
+            Ok(Err(e)) => {
+                warn!(
+                    event = "dir_delete.failed",
+                    error = %e,
+                    "failed to delete directory"
+                );
+            }
+            Err(e) => {
+                warn!(
+                    event = "dir_delete.task_failed",
+                    error = %e,
+                    "directory deletion task failed"
+                );
+            }
+        }
+    }
+
     let purge_urls = get_purge_urls(&deltas, &project.bunny_pull_zone_domain);
 
     if !purge_urls.is_empty() {
@@ -403,6 +456,7 @@ async fn deploy_project(
         modified: modified_count,
         purged: purged_count,
         skipped: skipped_count,
+        dirs_deleted: successful_dir_deletions,
     })
 }
 
@@ -475,31 +529,33 @@ async fn clone_repo(repo_url: &str, dest: &std::path::Path, branch: &str) -> Res
     Ok(())
 }
 
-async fn collect_local_files(dir: &std::path::Path) -> Result<HashMap<String, String>> {
+async fn collect_local_files(dir: &std::path::Path) -> Result<LocalFileSet> {
     let mut files = HashMap::new();
+    let mut directories = Vec::new();
 
     for entry in walkdir::WalkDir::new(dir) {
         let entry = entry?;
-        if !entry.file_type().is_file() {
-            continue;
-        }
-
         let path = entry.path();
         let relative = path.strip_prefix(dir)?;
         let key = relative.to_string_lossy().replace('\\', "/");
 
-        // Skip .git directory
-        if key.starts_with(".git/") || key == ".git" {
+        // Skip root and .git directory
+        if key.is_empty() || key.starts_with(".git/") || key == ".git" {
             continue;
         }
 
-        let content = fs::read(path)?;
-        // Use SHA-256 to match Bunny Storage API checksum format
-        let checksum = Sha256::digest(&content);
-        let checksum = hex::encode_upper(checksum);
+        if entry.file_type().is_dir() {
+            // Collect directory (but not root)
+            directories.push(key);
+        } else if entry.file_type().is_file() {
+            let content = fs::read(path)?;
+            // Use SHA-256 to match Bunny Storage API checksum format
+            let checksum = Sha256::digest(&content);
+            let checksum = hex::encode_upper(checksum);
 
-        files.insert(key, checksum);
+            files.insert(key, checksum);
+        }
     }
 
-    Ok(files)
+    Ok(LocalFileSet { files, directories })
 }

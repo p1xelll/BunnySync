@@ -1,3 +1,4 @@
+use crate::types::RemoteFileSet;
 use anyhow::{Context, Result, anyhow};
 use reqwest::Client;
 use serde::Deserialize;
@@ -35,12 +36,15 @@ fn join_path(dir: &str, name: &str) -> String {
     if dir.is_empty() {
         name.to_string()
     } else {
-        format!("{}/{}" , dir, name)
+        format!("{}/{}", dir, name)
     }
 }
 
 fn encode_path(path: &str) -> String {
-    path.split('/').map(urlencoding::encode).collect::<Vec<_>>().join("/")
+    path.split('/')
+        .map(urlencoding::encode)
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 impl BunnyStorage {
@@ -52,10 +56,11 @@ impl BunnyStorage {
         }
     }
 
-    /// Recursively list all files in storage zone
+    /// Recursively list all files and directories in storage zone
     /// Bunny Storage Edge requires manual recursion for subdirectories
-    pub async fn list_files(&self, _path: &str) -> Result<HashMap<String, String>> {
+    pub async fn list_files(&self, _path: &str) -> Result<RemoteFileSet> {
         let mut all_files = HashMap::new();
+        let mut all_directories = Vec::new();
         let mut dirs_to_scan = vec!["".to_string()];
 
         while let Some(dir) = dirs_to_scan.pop() {
@@ -63,7 +68,10 @@ impl BunnyStorage {
             let url = if dir.is_empty() {
                 format!("https://storage.bunnycdn.com/{}/", self.storage_zone)
             } else {
-                format!("https://storage.bunnycdn.com/{}/{}/", self.storage_zone, dir)
+                format!(
+                    "https://storage.bunnycdn.com/{}/{}/",
+                    self.storage_zone, dir
+                )
             };
 
             debug!(event = "storage.list_files.request", url = %url, dir = %dir);
@@ -97,7 +105,12 @@ impl BunnyStorage {
                 let is_dir = item.is_directory.unwrap_or(false) || item.checksum.is_none();
 
                 if is_dir {
-                    dirs_to_scan.push(join_path(&dir, &item.name));
+                    let dir_path = join_path(&dir, &item.name);
+                    // Don't add root directory
+                    if !dir_path.is_empty() {
+                        all_directories.push(dir_path.clone());
+                    }
+                    dirs_to_scan.push(dir_path);
                 } else if let Some(checksum) = item.checksum {
                     all_files.insert(join_path(&dir, &item.name), checksum);
                 }
@@ -107,8 +120,12 @@ impl BunnyStorage {
         debug!(
             event = "storage.list_files.complete",
             total_files = all_files.len(),
+            total_dirs = all_directories.len(),
         );
-        Ok(all_files)
+        Ok(RemoteFileSet {
+            files: all_files,
+            directories: all_directories,
+        })
     }
 
     pub async fn upload_file(&self, remote_path: &str, content: &[u8]) -> Result<()> {
@@ -158,6 +175,43 @@ impl BunnyStorage {
             Ok(())
         } else {
             Err(anyhow!("failed to delete file: {}", response.status()))
+        }
+    }
+
+    pub async fn delete_directory(&self, remote_path: &str) -> Result<()> {
+        // Note: Bunny Storage API doesn't have a direct directory delete endpoint
+        // We need to delete the directory by path (which should be empty after file deletions)
+        // The API treats directories as objects with trailing slashes
+        let url = format!(
+            "https://storage.bunnycdn.com/{}/{}/",
+            self.storage_zone,
+            encode_path(remote_path)
+        );
+
+        debug!(
+            event = "storage.delete_directory.request",
+            path = %remote_path,
+            url = %url
+        );
+
+        let response = self
+            .client
+            .delete(&url)
+            .header("AccessKey", &self.password)
+            .send()
+            .await
+            .context("failed to delete directory")?;
+
+        // 404 is OK - directory might already be deleted or never existed
+        if response.status().is_success() || response.status().as_u16() == 404 {
+            debug!(
+                event = "storage.delete_directory.success",
+                path = %remote_path,
+                status = %response.status()
+            );
+            Ok(())
+        } else {
+            Err(anyhow!("failed to delete directory: {}", response.status()))
         }
     }
 }

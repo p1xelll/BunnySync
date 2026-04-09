@@ -119,23 +119,6 @@ impl Config {
             bunny_api_key,
         })
     }
-
-    pub fn validate_and_print(&self) {
-        eprintln!("[startup] validating config...");
-
-        let project_ids: Vec<_> = self.projects.keys().cloned().collect();
-        eprintln!("[startup] found projects: {}", project_ids.join(", "));
-
-        for id in self.projects.keys() {
-            eprintln!("[startup] {}: ok", id);
-        }
-
-        eprintln!("[startup] global BUNNY_API_KEY: ok");
-        eprintln!(
-            "[startup] config valid — starting server on {}",
-            self.bind_addr
-        );
-    }
 }
 
 #[derive(Debug)]
