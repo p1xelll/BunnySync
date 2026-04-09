@@ -219,6 +219,7 @@ No credentials, tokens, or user data are stored on disk. The server is fully sta
 | `PROJECT_{ID}_REPO_URL` | yes | Full git clone URL |
 | `PROJECT_{ID}_WEBHOOK_SECRET` | yes | HMAC secret — min 32 chars |
 | `PROJECT_{ID}_BUNNY_STORAGE_ZONE` | yes | Storage zone name |
+| `PROJECT_{ID}_BUNNY_STORAGE_ZONE_ID` | yes | Storage zone ID (numeric, from Bunny dashboard) |
 | `PROJECT_{ID}_BUNNY_STORAGE_PASSWORD` | yes | Storage zone password — upload/delete files |
 | `PROJECT_{ID}_BUNNY_PULL_ZONE_ID` | yes | Pull zone ID — CDN cache purge |
 | `PROJECT_{ID}_BUNNY_API_KEY` | no | Overrides global `BUNNY_API_KEY` for this project only |
@@ -252,6 +253,7 @@ BUNNY_API_KEY=global-api-key
 PROJECT_FILMLOG_REPO_URL=https://codeberg.org/p1xel/filmlog.git
 PROJECT_FILMLOG_WEBHOOK_SECRET=<random 32+ chars>
 PROJECT_FILMLOG_BUNNY_STORAGE_ZONE=filmlogeu
+PROJECT_FILMLOG_BUNNY_STORAGE_ZONE_ID=12345
 PROJECT_FILMLOG_BUNNY_STORAGE_PASSWORD=xxx
 PROJECT_FILMLOG_BUNNY_PULL_ZONE_ID=5651817
 ```

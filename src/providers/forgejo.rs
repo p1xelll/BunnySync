@@ -1,5 +1,5 @@
 use super::{GitProvider, PushEvent};
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use axum::http::HeaderMap;
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
@@ -43,16 +43,20 @@ impl GitProvider for ForgejoProvider {
             .ok_or_else(|| anyhow!("missing ref"))?
             .to_string();
 
-        let commit = json
+        let before = json.get("before").and_then(|v| v.as_str()).unwrap_or("");
+
+        let after = json
             .get("after")
             .and_then(|v| v.as_str())
-            .unwrap_or("unknown")
-            .to_string();
+            .unwrap_or("unknown");
 
-        Ok(PushEvent { ref_name, commit })
-    }
+        // Detect test webhook: before and after are the same
+        let is_test = before == after && !before.is_empty();
 
-    fn name(&self) -> &'static str {
-        "Forgejo"
+        Ok(PushEvent {
+            ref_name,
+            commit: after.to_string(),
+            is_test,
+        })
     }
 }

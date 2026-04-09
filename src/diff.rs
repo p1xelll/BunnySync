@@ -23,33 +23,18 @@ pub fn compute_delta(
     let mut deltas = Vec::new();
 
     for (path, local_checksum) in local_files {
-        match remote_files.get(path) {
-            None => {
-                deltas.push(FileDelta {
-                    path: path.clone(),
-                    action: FileAction::Upload,
-                    local_checksum: Some(local_checksum.clone()),
-                    remote_checksum: None,
-                });
-            }
-            Some(remote_checksum) => {
-                if local_checksum == remote_checksum {
-                    deltas.push(FileDelta {
-                        path: path.clone(),
-                        action: FileAction::Skip,
-                        local_checksum: Some(local_checksum.clone()),
-                        remote_checksum: Some(remote_checksum.clone()),
-                    });
-                } else {
-                    deltas.push(FileDelta {
-                        path: path.clone(),
-                        action: FileAction::Upload,
-                        local_checksum: Some(local_checksum.clone()),
-                        remote_checksum: Some(remote_checksum.clone()),
-                    });
-                }
-            }
-        }
+        let remote_checksum = remote_files.get(path);
+        let action = match remote_checksum {
+            None => FileAction::Upload,
+            Some(rc) if local_checksum == rc => FileAction::Skip,
+            Some(_) => FileAction::Upload,
+        };
+        deltas.push(FileDelta {
+            path: path.clone(),
+            action,
+            local_checksum: Some(local_checksum.clone()),
+            remote_checksum: remote_checksum.cloned(),
+        });
     }
 
     for (path, remote_checksum) in remote_files {
@@ -67,13 +52,19 @@ pub fn compute_delta(
 }
 
 pub fn get_purge_urls(deltas: &[FileDelta], pull_zone_domain: &str) -> Vec<String> {
+    // Strip protocol if present (handle both "example.com" and "https://example.com")
+    let domain = pull_zone_domain
+        .strip_prefix("https://")
+        .or_else(|| pull_zone_domain.strip_prefix("http://"))
+        .unwrap_or(pull_zone_domain);
+
     deltas
         .iter()
         .filter(|d| {
             matches!(d.action, FileAction::Upload | FileAction::Delete)
                 && d.remote_checksum.is_some()
         })
-        .map(|d| format!("https://{}/{}", pull_zone_domain, d.path))
+        .map(|d| format!("https://{}/{}", domain, d.path))
         .collect()
 }
 
@@ -89,4 +80,18 @@ pub fn get_deletions(deltas: &[FileDelta]) -> Vec<&FileDelta> {
         .iter()
         .filter(|d| matches!(d.action, FileAction::Delete))
         .collect()
+}
+
+pub fn get_skips(deltas: &[FileDelta]) -> Vec<&FileDelta> {
+    deltas
+        .iter()
+        .filter(|d| matches!(d.action, FileAction::Skip))
+        .collect()
+}
+
+pub fn count_modified(deltas: &[FileDelta]) -> usize {
+    deltas
+        .iter()
+        .filter(|d| matches!(d.action, FileAction::Upload) && d.remote_checksum.is_some())
+        .count()
 }

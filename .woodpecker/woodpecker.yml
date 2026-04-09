@@ -1,5 +1,5 @@
 # Woodpecker CI pipeline for bunnysync
-# Builds multi-arch Docker images (amd64 + arm64) with manifest lists
+# Builds multi-arch Docker images (amd64 + arm64) and pushes to Docker Hub
 
 when:
   - event: push
@@ -9,8 +9,8 @@ when:
   - event: tag
 
 variables:
-  - &registry codeberg.org
-  - &repo "codeberg.org/${CI_REPO_OWNER}/${CI_REPO_NAME}"
+  - &registry docker.io
+  - &repo "${CI_REPO_OWNER}/bunnysync"
 
 steps:
   # === QUALITY CHECKS (run first for fast feedback) ===
@@ -51,7 +51,7 @@ steps:
     image: woodpeckerci/plugin-docker-buildx
     privileged: true
     settings:
-      repo: ${CI_REPO_OWNER}/${CI_REPO_NAME}
+      repo: *repo
       dockerfile: Dockerfile
       context: .
       platforms: linux/amd64,linux/arm64

@@ -81,27 +81,32 @@ impl Config {
         project_id: &str,
     ) -> Result<ProjectConfig, ConfigError> {
         let prefix = format!("PROJECT_{}_", project_id);
-        let get = |key: &str| get_project_var(vars, project_id, key);
+        let get = |key: &str| {
+            let key = format!("{prefix}{key}");
+            vars.get(&key)
+                .ok_or_else(|| ConfigError::MissingProjectVar(project_id.to_string(), key))
+                .cloned()
+        };
 
-        let repo_url = get(&format!("{prefix}REPO_URL"))?;
+        let repo_url = get("REPO_URL")?;
         if !repo_url.starts_with("http://") && !repo_url.starts_with("https://") {
             return Err(ConfigError::InvalidUrl(project_id.to_string(), repo_url));
         }
 
-        let webhook_secret = get(&format!("{prefix}WEBHOOK_SECRET"))?;
+        let webhook_secret = get("WEBHOOK_SECRET")?;
         if webhook_secret.len() < 32 {
             return Err(ConfigError::ShortSecret(project_id.to_string()));
         }
 
-        let bunny_storage_zone = get(&format!("{prefix}BUNNY_STORAGE_ZONE"))?;
-        let bunny_storage_password = get(&format!("{prefix}BUNNY_STORAGE_PASSWORD"))?;
-        let bunny_pull_zone_id = get(&format!("{prefix}BUNNY_PULL_ZONE_ID"))?;
+        let bunny_storage_zone = get("BUNNY_STORAGE_ZONE")?;
+        let bunny_storage_password = get("BUNNY_STORAGE_PASSWORD")?;
+        let bunny_pull_zone_id = get("BUNNY_PULL_ZONE_ID")?;
 
         if bunny_pull_zone_id.parse::<u64>().is_err() {
             return Err(ConfigError::InvalidPullZoneId(project_id.to_string()));
         }
 
-        let bunny_pull_zone_domain = get(&format!("{prefix}BUNNY_PULL_ZONE_DOMAIN"))?;
+        let bunny_pull_zone_domain = get("BUNNY_PULL_ZONE_DOMAIN")?;
         let bunny_api_key = vars.get(&format!("{prefix}BUNNY_API_KEY")).cloned();
 
         Ok(ProjectConfig {
@@ -181,15 +186,5 @@ fn extract_project_id(key: &str) -> Result<String, ConfigError> {
 fn get_required(vars: &HashMap<String, String>, key: &str) -> Result<String, ConfigError> {
     vars.get(key)
         .ok_or_else(|| ConfigError::MissingVar(key.to_string()))
-        .cloned()
-}
-
-fn get_project_var(
-    vars: &HashMap<String, String>,
-    project_id: &str,
-    key: &str,
-) -> Result<String, ConfigError> {
-    vars.get(key)
-        .ok_or_else(|| ConfigError::MissingProjectVar(project_id.to_string(), key.to_string()))
         .cloned()
 }

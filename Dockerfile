@@ -50,4 +50,4 @@ USER appuser
 
 EXPOSE 3000
 
-CMD ["bunnysync"]
+ENTRYPOINT ["bunnysync"]

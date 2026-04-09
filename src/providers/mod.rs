@@ -10,14 +10,13 @@ pub trait GitProvider: Send + Sync {
         secret: &str,
     ) -> anyhow::Result<String>;
     fn parse_push_event(&self, payload: &[u8]) -> anyhow::Result<PushEvent>;
-    #[allow(dead_code)]
-    fn name(&self) -> &'static str;
 }
 
 #[derive(Debug, Clone)]
 pub struct PushEvent {
     pub ref_name: String,
     pub commit: String,
+    pub is_test: bool, // true when before == after (test webhook)
 }
 
 pub fn detect_provider(headers: &HeaderMap) -> Option<Box<dyn GitProvider>> {

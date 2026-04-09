@@ -2,18 +2,22 @@ use crate::bunny::cdn::BunnyCdn;
 use crate::bunny::storage::BunnyStorage;
 use crate::config::ProjectConfig;
 use crate::deploy_queue::DeployQueue;
-use crate::diff::{compute_delta, get_deletions, get_purge_urls, get_uploads};
+use crate::diff::{
+    compute_delta, count_modified, get_deletions, get_purge_urls, get_skips, get_uploads,
+};
 use crate::providers::detect_provider;
 use crate::signature_cache::SignatureCache;
 use anyhow::{Context, Result};
 use axum::{
     Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
-    response::IntoResponse,
+    response::{IntoResponse, Json},
     routing::{get, post},
 };
 use git2::{FetchOptions, Repository};
+use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
 
@@ -22,7 +26,36 @@ use std::time::Duration;
 use tempfile::TempDir;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
+
+#[derive(Serialize)]
+struct DeployResponse {
+    status: String,
+    uploaded: usize,
+    deleted: usize,
+    modified: usize,
+    purged: usize,
+    skipped: usize,
+}
+
+impl DeployResponse {
+    fn success(
+        uploaded: usize,
+        deleted: usize,
+        modified: usize,
+        purged: usize,
+        skipped: usize,
+    ) -> Self {
+        Self {
+            status: "deployed".to_string(),
+            uploaded,
+            deleted,
+            modified,
+            purged,
+            skipped,
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct AppState {
@@ -51,9 +84,44 @@ async fn health_handler() -> impl IntoResponse {
 async fn handle_webhook(
     State(state): State<AppState>,
     Path(project_id): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
     headers: HeaderMap,
     body: axum::body::Bytes,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    // Check for test mode - only verify signature and return, no deploy
+    if params
+        .get("test")
+        .map(|v| v == "1" || v == "true")
+        .unwrap_or(false)
+    {
+        info!(
+            event = "webhook.test_mode",
+            project_id = %project_id,
+            "test mode detected - validating only, no deploy"
+        );
+
+        // Still verify the project exists
+        if !state.config.projects.contains_key(&project_id) {
+            return (StatusCode::NOT_FOUND, "project not found").into_response();
+        }
+
+        // Still verify signature
+        let provider = match detect_provider(&headers) {
+            Some(p) => p,
+            None => return (StatusCode::BAD_REQUEST, "unknown provider").into_response(),
+        };
+
+        let project = state.config.projects.get(&project_id).unwrap();
+        if provider.verify_signature(&body, &headers, &project.webhook_secret).is_err() {
+            return (StatusCode::UNAUTHORIZED, "invalid signature").into_response();
+        }
+
+        return (
+            StatusCode::OK,
+            "test webhook received - project configured correctly, signature valid",
+        )
+            .into_response();
+    }
     info!(
         event = "webhook.received",
         project_id = %project_id,
@@ -68,7 +136,7 @@ async fn handle_webhook(
                 project_id = %project_id,
                 "project not found"
             );
-            return (StatusCode::NOT_FOUND, "project not found");
+            return (StatusCode::NOT_FOUND, "project not found").into_response();
         }
     };
 
@@ -76,7 +144,7 @@ async fn handle_webhook(
         Some(p) => p,
         None => {
             warn!(event = "webhook.unknown_provider", "unknown provider");
-            return (StatusCode::BAD_REQUEST, "unknown provider");
+            return (StatusCode::BAD_REQUEST, "unknown provider").into_response();
         }
     };
 
@@ -88,7 +156,7 @@ async fn handle_webhook(
                 error = %e,
                 "signature verification failed"
             );
-            return (StatusCode::UNAUTHORIZED, "invalid signature");
+            return (StatusCode::UNAUTHORIZED, "invalid signature").into_response();
         }
     };
 
@@ -98,7 +166,7 @@ async fn handle_webhook(
             project_id = %project_id,
             "replay attack detected - signature already used"
         );
-        return (StatusCode::CONFLICT, "duplicate webhook");
+        return (StatusCode::CONFLICT, "duplicate webhook").into_response();
     }
 
     state.signature_cache.insert(signature).await;
@@ -111,9 +179,23 @@ async fn handle_webhook(
                 error = %e,
                 "failed to parse push event"
             );
-            return (StatusCode::BAD_REQUEST, "invalid payload");
+            return (StatusCode::BAD_REQUEST, "invalid payload").into_response();
         }
     };
+
+    // Check if this is a test webhook (before == after)
+    if push_event.is_test {
+        info!(
+            event = "webhook.test",
+            project_id = %project_id,
+            "test webhook detected - no deploy performed"
+        );
+        return (
+            StatusCode::OK,
+            "test webhook received - signature valid, no deploy",
+        )
+            .into_response();
+    }
 
     info!(
         event = "deploy.started",
@@ -131,32 +213,62 @@ async fn handle_webhook(
                 project_id = %project_id,
                 "deploy already in progress for this project"
             );
-            return (StatusCode::CONFLICT, "deploy already in progress");
+            return (StatusCode::CONFLICT, "deploy already in progress").into_response();
         }
     };
 
-    if let Err(e) = deploy_project(project, &push_event).await {
-        error!(
-            event = "deploy.failed",
-            project_id = %project_id,
-            error = %e,
-            "deploy failed"
-        );
-        return (StatusCode::INTERNAL_SERVER_ERROR, "deploy failed");
-    }
+    let api_key = project
+        .bunny_api_key
+        .clone()
+        .unwrap_or_else(|| state.config.bunny_api_key.clone());
 
-    info!(
-        event = "deploy.completed",
-        project_id = %project_id,
-        "deploy completed successfully"
-    );
-    (StatusCode::OK, "deployed")
+    match deploy_project(project, &push_event, api_key).await {
+        Ok(stats) => {
+            info!(
+                event = "deploy.completed",
+                project_id = %project_id,
+                uploaded = stats.uploaded,
+                deleted = stats.deleted,
+                modified = stats.modified,
+                purged = stats.purged,
+                skipped = stats.skipped,
+                "deploy completed successfully"
+            );
+            let response = DeployResponse::success(
+                stats.uploaded,
+                stats.deleted,
+                stats.modified,
+                stats.purged,
+                stats.skipped,
+            );
+            (StatusCode::OK, Json(response)).into_response()
+        }
+        Err(e) => {
+            error!(
+                event = "deploy.failed",
+                project_id = %project_id,
+                error = %e,
+                "deploy failed"
+            );
+            (StatusCode::INTERNAL_SERVER_ERROR, "deploy failed").into_response()
+        }
+    }
+}
+
+#[derive(Debug)]
+struct DeployStats {
+    uploaded: usize,
+    deleted: usize,
+    modified: usize,
+    purged: usize,
+    skipped: usize,
 }
 
 async fn deploy_project(
     project: &ProjectConfig,
     push_event: &crate::providers::PushEvent,
-) -> Result<()> {
+    _api_key: String,
+) -> Result<DeployStats> {
     let temp_dir = TempDir::new().context("failed to create temp directory")?;
     let repo_path = temp_dir.path().join("repo");
 
@@ -175,15 +287,55 @@ async fn deploy_project(
 
     let remote_files = storage.list_files("").await?;
 
+    // Debug: Log file counts and sample checksums
+    debug!(
+        event = "deploy.file_counts",
+        local_count = local_files.len(),
+        remote_count = remote_files.len(),
+        "local vs remote file counts"
+    );
+
+    // Log first 5 local files with checksums
+    for (i, (path, checksum)) in local_files.iter().take(5).enumerate() {
+        debug!(
+            event = "deploy.local_file_sample",
+            index = i,
+            path = %path,
+            checksum = %checksum,
+            "local file sample"
+        );
+    }
+
+    // Log first 5 remote files with checksums
+    for (i, (path, checksum)) in remote_files.iter().take(5).enumerate() {
+        debug!(
+            event = "deploy.remote_file_sample",
+            index = i,
+            path = %path,
+            checksum = %checksum,
+            "remote file sample"
+        );
+    }
+
     let deltas = compute_delta(&local_files, &remote_files);
+
+    // Calculate stats before consuming the vectors
+    let uploaded_count = get_uploads(&deltas).len();
+    let deleted_count = get_deletions(&deltas).len();
+    let modified_count = count_modified(&deltas);
+    let skipped_count = get_skips(&deltas).len();
 
     let uploads = get_uploads(&deltas);
     let deletions = get_deletions(&deltas);
 
     info!(
         event = "delta.computed",
-        uploads = uploads.len(),
-        deletions = deletions.len(),
+        local_files = local_files.len(),
+        remote_files = remote_files.len(),
+        uploads = uploaded_count,
+        deletions = deleted_count,
+        modified = modified_count,
+        skipped = skipped_count,
         "delta computed"
     );
 
@@ -243,7 +395,15 @@ async fn deploy_project(
         }
     }
 
-    Ok(())
+    let purged_count = purge_urls.len();
+
+    Ok(DeployStats {
+        uploaded: uploaded_count,
+        deleted: deleted_count,
+        modified: modified_count,
+        purged: purged_count,
+        skipped: skipped_count,
+    })
 }
 
 async fn upload_with_retry(
@@ -328,8 +488,15 @@ async fn collect_local_files(dir: &std::path::Path) -> Result<HashMap<String, St
         let relative = path.strip_prefix(dir)?;
         let key = relative.to_string_lossy().replace('\\', "/");
 
+        // Skip .git directory
+        if key.starts_with(".git/") || key == ".git" {
+            continue;
+        }
+
         let content = fs::read(path)?;
-        let checksum = format!("{:x}", md5::compute(&content));
+        // Use SHA-256 to match Bunny Storage API checksum format
+        let checksum = Sha256::digest(&content);
+        let checksum = hex::encode_upper(checksum);
 
         files.insert(key, checksum);
     }
