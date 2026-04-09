@@ -39,7 +39,6 @@ steps:
 
   build-pr:
     image: woodpeckerci/plugin-docker-buildx
-    privileged: true
     settings:
       repo: *repo
       dockerfile: Dockerfile
@@ -55,7 +54,6 @@ steps:
 
   build-amd64:
     image: woodpeckerci/plugin-docker-buildx
-    privileged: true
     settings:
       repo: *repo
       dockerfile: Dockerfile
@@ -75,7 +73,6 @@ steps:
 
   build-arm64:
     image: woodpeckerci/plugin-docker-buildx
-    privileged: true
     settings:
       repo: *repo
       dockerfile: Dockerfile
@@ -97,7 +94,6 @@ steps:
 
   manifest-sha:
     image: woodpeckerci/plugin-docker-buildx
-    privileged: true
     settings:
       repo: *repo
       tag: ${CI_COMMIT_SHA:0:8}
@@ -113,7 +109,6 @@ steps:
 
   manifest-latest:
     image: woodpeckerci/plugin-docker-buildx
-    privileged: true
     settings:
       repo: *repo
       tag: latest
@@ -130,7 +125,6 @@ steps:
 
   manifest-version:
     image: woodpeckerci/plugin-docker-buildx
-    privileged: true
     settings:
       repo: *repo
       tag: ${CI_COMMIT_TAG}
