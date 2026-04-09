@@ -2,6 +2,8 @@
 
 A webhook receiver that automatically deploys Git repositories to BunnyCDN Storage zones. Supports Forgejo webhooks with automatic CDN cache purging.
 
+**Docker Hub:** https://hub.docker.com/r/p1xelll/bunnysync
+
 ## Features
 
 - **Webhook Support**: Receives push events from Forgejo
@@ -20,7 +22,7 @@ A webhook receiver that automatically deploys Git repositories to BunnyCDN Stora
 Pull the latest image:
 
 ```bash
-docker pull yourusername/bunnysync:latest
+docker pull p1xelll/bunnysync:latest
 ```
 
 Run with environment variables:
@@ -36,7 +38,7 @@ docker run -d \
   -e PROJECT_MYAPP_BUNNY_STORAGE_PASSWORD=zone-password \
   -e PROJECT_MYAPP_BUNNY_PULL_ZONE_ID=123456 \
   -e PROJECT_MYAPP_BUNNY_PULL_ZONE_DOMAIN=cdn.example.com \
-  yourusername/bunnysync:latest
+  p1xelll/bunnysync:latest
 ```
 
 ## Docker Compose
@@ -48,7 +50,7 @@ version: '3.8'
 
 services:
   bunnysync:
-    image: yourusername/bunnysync:latest
+    image: p1xelll/bunnysync:latest
     container_name: bunnysync
     restart: unless-stopped
     ports:
@@ -222,7 +224,7 @@ The application is built with:
 ## Adding a New Provider
 
 BunnySync uses a provider system to support different Git hosting platforms. Currently supported:
-- **Forgejo** / **Gitea**
+- **Forgejo**
 
 To add a new provider:
 
@@ -412,7 +414,7 @@ docker build -t bunnysync:local .
 ```bash
 docker buildx build \
   --platform linux/amd64,linux/arm64 \
-  -t yourusername/bunnysync:latest \
+  -t p1xelll/bunnysync:latest \
   --push .
 ```
 
