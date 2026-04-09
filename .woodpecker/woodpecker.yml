@@ -15,13 +15,13 @@ steps:
   # === QUALITY CHECKS ===
 
   fmt:
-    image: rust:1.85-slim-bookworm
+    image: rust:1.86-slim-bookworm
     commands:
       - rustup component add rustfmt
       - cargo fmt --check
 
   lint:
-    image: rust:1.85-slim-bookworm
+    image: rust:1.86-slim-bookworm
     commands:
       - apt-get update && apt-get install -y pkg-config libssl-dev cmake git
       - rustup component add clippy
@@ -29,7 +29,7 @@ steps:
     depends_on: [fmt]
 
   test:
-    image: rust:1.85-slim-bookworm
+    image: rust:1.86-slim-bookworm
     commands:
       - apt-get update && apt-get install -y pkg-config libssl-dev cmake git
       - cargo test --release
