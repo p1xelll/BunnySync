@@ -1,0 +1,32 @@
+# Git
+.git
+.gitignore
+
+# Rust build artifacts
+target/
+Cargo.lock
+dist/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Documentation
+README.md
+*.md
+
+# Docker files themselves (not needed in build context)
+Dockerfile*
+docker-compose*
+.dockerignore
+
+# Local dev files
+.env
+.env.*
+*.log

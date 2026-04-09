@@ -1,0 +1,98 @@
+# Woodpecker CI pipeline for bunny-deploy
+# Builds and pushes Docker image using cargo-chef for caching
+
+when:
+  - event: push
+    branch: main
+  - event: pull_request
+    branch: main
+  - event: tag
+
+steps:
+  # Build Docker image with cargo-chef
+  build-and-push:
+    image: woodpeckerci/plugin-docker-buildx
+    settings:
+      repo: ${CI_REPO_OWNER}/${CI_REPO_NAME}
+      tags:
+        - latest
+        - ${CI_COMMIT_SHA:0:8}
+      dockerfile: Dockerfile
+      context: .
+      build_args:
+        - BUILDKIT_INLINE_CACHE=1
+      # Enable BuildKit for optimal layer caching
+      buildkit: true
+      # Cache from registry for faster builds
+      cache_from: ${CI_REPO_OWNER}/${CI_REPO_NAME}:latest
+    secrets:
+      - source: docker_username
+        target: plugin_username
+      - source: docker_password
+        target: plugin_password
+    when:
+      - event: [push, tag]
+
+  # Build only for PRs (don't push)
+  build-pr:
+    image: woodpeckerci/plugin-docker-buildx
+    settings:
+      repo: ${CI_REPO_OWNER}/${CI_REPO_NAME}
+      dockerfile: Dockerfile
+      context: .
+      dry_run: true
+      build_args:
+        - BUILDKIT_INLINE_CACHE=1
+      buildkit: true
+      cache_from: ${CI_REPO_OWNER}/${CI_REPO_NAME}:latest
+    when:
+      - event: pull_request
+
+  # Run tests
+  test:
+    image: rust:1.85-slim-bookworm
+    commands:
+      - apt-get update && apt-get install -y pkg-config libssl-dev cmake git
+      - cargo test --release
+    when:
+      - event: [push, pull_request]
+
+  # Lint with clippy
+  lint:
+    image: rust:1.85-slim-bookworm
+    commands:
+      - apt-get update && apt-get install -y pkg-config libssl-dev cmake git
+      - rustup component add clippy
+      - cargo clippy -- -D warnings
+    when:
+      - event: [push, pull_request]
+
+  # Check formatting
+  fmt:
+    image: rust:1.85-slim-bookworm
+    commands:
+      - rustup component add rustfmt
+      - cargo fmt --check
+    when:
+      - event: [push, pull_request]
+
+  # Tag release builds
+  tag-release:
+    image: woodpeckerci/plugin-docker-buildx
+    settings:
+      repo: ${CI_REPO_OWNER}/${CI_REPO_NAME}
+      tags:
+        - ${CI_COMMIT_TAG}
+        - ${CI_COMMIT_TAG%.*}
+        - ${CI_COMMIT_TAG%%.*}
+        - latest
+      dockerfile: Dockerfile
+      context: .
+      buildkit: true
+    secrets:
+      - source: docker_username
+        target: plugin_username
+      - source: docker_password
+        target: plugin_password
+    when:
+      - event: tag

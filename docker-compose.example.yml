@@ -1,0 +1,29 @@
+services:
+  bunny-deploy:
+    image: p1xel/bunny-deploy:latest
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      # Global settings
+      BIND_ADDR: "0.0.0.0:3000"
+      BUNNY_API_KEY: "your-bunny-api-key"
+
+      # Project 1: blog
+      PROJECT_BLOG_REPO_URL: "https://codeberg.org/user/blog.git"
+      PROJECT_BLOG_WEBHOOK_SECRET: "your-webhook-secret-min-32-chars-long"
+      PROJECT_BLOG_BUNNY_STORAGE_ZONE: "blogzone"
+      PROJECT_BLOG_BUNNY_STORAGE_PASSWORD: "your-storage-password"
+      PROJECT_BLOG_BUNNY_PULL_ZONE_ID: "111111"
+      PROJECT_BLOG_BUNNY_PULL_ZONE_DOMAIN: "blog.b-cdn.net"
+
+      # Project 2: docs (optional - add more projects as needed)
+      # PROJECT_DOCS_REPO_URL: "https://codeberg.org/user/docs.git"
+      # PROJECT_DOCS_WEBHOOK_SECRET: "another-secret-min-32-chars-long"
+      # PROJECT_DOCS_BUNNY_STORAGE_ZONE: "docszone"
+      # PROJECT_DOCS_BUNNY_STORAGE_PASSWORD: "another-storage-password"
+      # PROJECT_DOCS_BUNNY_PULL_ZONE_ID: "222222"
+      # PROJECT_DOCS_BUNNY_PULL_ZONE_DOMAIN: "docs.b-cdn.net"
+      # PROJECT_DOCS_BUNNY_API_KEY: "optional-project-specific-api-key"
+
+    restart: unless-stopped
