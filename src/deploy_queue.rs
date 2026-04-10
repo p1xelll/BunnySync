@@ -7,6 +7,12 @@ pub struct DeployQueue {
     inner: Arc<Mutex<HashMap<String, Arc<Semaphore>>>>,
 }
 
+impl Default for DeployQueue {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DeployQueue {
     pub fn new() -> Self {
         Self {

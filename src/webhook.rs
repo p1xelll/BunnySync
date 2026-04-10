@@ -17,7 +17,7 @@ use axum::{
     response::{IntoResponse, Json},
     routing::{get, post},
 };
-use git2::{FetchOptions, Repository};
+
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -454,22 +454,40 @@ async fn clone_repo(repo_url: &str, dest: &std::path::Path, branch: &str) -> Res
         let dest = dest.to_path_buf();
         let branch = branch.to_string();
         move || {
-            let repo = Repository::init(&dest)?;
+            use gix::bstr::ByteSlice;
 
-            let mut remote = repo.remote("origin", &repo_url)?;
+            std::fs::create_dir_all(&dest)?;
 
-            let mut fetch_opts = FetchOptions::new();
-            fetch_opts.depth(1);
+            let url = gix::url::parse(repo_url.as_str().into())
+                .with_context(|| "failed to parse repository URL")?;
 
-            let refspec = format!("refs/heads/{}:refs/remotes/origin/{}", branch, branch);
-            remote.fetch(&[&refspec], Some(&mut fetch_opts), None)?;
+            let mut prepare_clone =
+                gix::prepare_clone(url, &dest).with_context(|| "failed to prepare clone")?;
 
-            let remote_branch_ref = format!("refs/remotes/origin/{}", branch);
-            let object = repo.revparse_single(&remote_branch_ref)?;
-            let commit = object.peel_to_commit()?;
+            let (mut prepare_checkout, outcome) = prepare_clone
+                .fetch_then_checkout(gix::progress::Discard, &gix::interrupt::IS_INTERRUPTED)
+                .with_context(|| "failed to fetch repository")?;
 
-            repo.checkout_tree(commit.as_object(), None)?;
-            repo.set_head_detached(commit.id())?;
+            let commit_id = outcome
+                .ref_map
+                .mappings
+                .iter()
+                .find_map(|m| {
+                    let local_ref = m.local.as_ref()?;
+                    let local_str = local_ref.as_bstr().to_str().ok()?;
+                    if local_str.contains(&format!("origin/{branch}")) {
+                        m.remote.as_id()
+                    } else {
+                        None
+                    }
+                })
+                .ok_or_else(|| anyhow::anyhow!("branch '{branch}' not found in remote"))?;
+
+            let (repo, _) = prepare_checkout
+                .main_worktree(gix::progress::Discard, &gix::interrupt::IS_INTERRUPTED)
+                .with_context(|| "failed to checkout main worktree")?;
+
+            let _ = (repo, commit_id);
 
             Ok::<_, anyhow::Error>(())
         }

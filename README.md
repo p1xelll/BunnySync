@@ -46,8 +46,6 @@ docker run -d \
 ### docker-compose.yml
 
 ```yaml
-version: '3.8'
-
 services:
   bunnysync:
     image: p1xelll/bunnysync:latest
@@ -59,7 +57,7 @@ services:
       # Server configuration
       - BIND_ADDR=0.0.0.0:3000
       - BUNNY_API_KEY=${BUNNY_API_KEY}
-      
+
       # Project 1: MyApp
       - PROJECT_MYAPP_REPO_URL=https://git.example.com/user/myapp.git
       - PROJECT_MYAPP_WEBHOOK_SECRET=${MYAPP_WEBHOOK_SECRET}
@@ -68,7 +66,7 @@ services:
       - PROJECT_MYAPP_BUNNY_PULL_ZONE_ID=123456
       - PROJECT_MYAPP_BUNNY_PULL_ZONE_DOMAIN=cdn.example.com
       - PROJECT_MYAPP_BUNNY_API_KEY=${MYAPP_BUNNY_API_KEY}
-      
+
       # Project 2: Website (optional)
       - PROJECT_WEBSITE_REPO_URL=https://git.example.com/user/website.git
       - PROJECT_WEBSITE_WEBHOOK_SECRET=${WEBSITE_WEBHOOK_SECRET}
@@ -76,12 +74,6 @@ services:
       - PROJECT_WEBSITE_BUNNY_STORAGE_PASSWORD=${WEBSITE_STORAGE_PASSWORD}
       - PROJECT_WEBSITE_BUNNY_PULL_ZONE_ID=789012
       - PROJECT_WEBSITE_BUNNY_PULL_ZONE_DOMAIN=www.example.com
-    healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 5s
 ```
 
 ### .env.example
@@ -216,7 +208,7 @@ PROJECT_SHOP_BUNNY_PULL_ZONE_DOMAIN=shop.example.com
 The application is built with:
 - **Rust** with Tokio async runtime
 - **Axum** web framework
-- **libgit2** for Git operations
+- **gix** (pure Rust Git implementation) for Git operations
 - **reqwest** for HTTP requests
 
 ### Performance Features
@@ -378,20 +370,18 @@ Once your provider is working:
 
 ### Requirements
 
-- **Rust** 1.85+ (for the application)
-- **CMake** (required by the `git2` crate to compile libgit2)
-- **OpenSSL** development libraries (`libssl-dev` on Debian/Ubuntu)
-- **pkg-config** (to locate system libraries)
-- **Git** (for repository operations)
+- **Rust** 1.85+
+
+No other dependencies required - BunnySync is written in pure Rust with no C library dependencies.
 
 On Debian/Ubuntu:
 ```bash
-sudo apt-get update && sudo apt-get install -y cmake libssl-dev pkg-config git
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
 On macOS:
 ```bash
-brew install cmake openssl pkg-config git
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
 ### Build

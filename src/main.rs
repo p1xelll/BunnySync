@@ -1,12 +1,5 @@
-mod bunny;
-mod config;
-mod deploy_queue;
-mod diff;
-mod providers;
-mod signature_cache;
-mod types;
-mod webhook;
-
+use bunnysync::config::Config;
+use bunnysync::webhook::create_router;
 use std::sync::Arc;
 use tracing::error;
 
@@ -14,7 +7,7 @@ use tracing::error;
 async fn main() {
     tracing_subscriber::fmt::init();
 
-    let config = match config::Config::from_env() {
+    let config = match Config::from_env() {
         Ok(c) => Arc::new(c),
         Err(e) => {
             eprintln!("[startup] FATAL: invalid configuration — {}", e);
@@ -22,7 +15,7 @@ async fn main() {
         }
     };
 
-    let app = webhook::create_router(config.clone());
+    let app = create_router(config.clone());
 
     let listener = match tokio::net::TcpListener::bind(&config.bind_addr).await {
         Ok(l) => l,
