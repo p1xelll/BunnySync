@@ -43,38 +43,7 @@ docker run -d \
 
 ## Docker Compose
 
-### docker-compose.yml
-
-```yaml
-services:
-  bunnysync:
-    image: p1xelll/bunnysync:latest
-    container_name: bunnysync
-    restart: unless-stopped
-    ports:
-      - "3000:3000"
-    environment:
-      # Server configuration
-      - BIND_ADDR=0.0.0.0:3000
-      - BUNNY_API_KEY=${BUNNY_API_KEY}
-
-      # Project 1: MyApp
-      - PROJECT_MYAPP_REPO_URL=https://git.example.com/user/myapp.git
-      - PROJECT_MYAPP_WEBHOOK_SECRET=${MYAPP_WEBHOOK_SECRET}
-      - PROJECT_MYAPP_BUNNY_STORAGE_ZONE=myapp-storage
-      - PROJECT_MYAPP_BUNNY_STORAGE_PASSWORD=${MYAPP_STORAGE_PASSWORD}
-      - PROJECT_MYAPP_BUNNY_PULL_ZONE_ID=123456
-      - PROJECT_MYAPP_BUNNY_PULL_ZONE_DOMAIN=cdn.example.com
-      - PROJECT_MYAPP_BUNNY_API_KEY=${MYAPP_BUNNY_API_KEY}
-
-      # Project 2: Website (optional)
-      - PROJECT_WEBSITE_REPO_URL=https://git.example.com/user/website.git
-      - PROJECT_WEBSITE_WEBHOOK_SECRET=${WEBSITE_WEBHOOK_SECRET}
-      - PROJECT_WEBSITE_BUNNY_STORAGE_ZONE=website-storage
-      - PROJECT_WEBSITE_BUNNY_STORAGE_PASSWORD=${WEBSITE_STORAGE_PASSWORD}
-      - PROJECT_WEBSITE_BUNNY_PULL_ZONE_ID=789012
-      - PROJECT_WEBSITE_BUNNY_PULL_ZONE_DOMAIN=www.example.com
-```
+The easiest way to run BunnySync is with Docker Compose. See the included [`docker-compose.yml`](docker-compose.yml) file for a complete example.
 
 ### .env.example
 
@@ -135,6 +104,22 @@ Replace `{PROJECT_ID}` with your project identifier (uppercase, alphanumeric + u
 | `PROJECT_{PROJECT_ID}_BUNNY_PULL_ZONE_ID` | Yes | Pull zone ID (number) |
 | `PROJECT_{PROJECT_ID}_BUNNY_PULL_ZONE_DOMAIN` | Yes | Pull zone domain (e.g., `cdn.example.com`) |
 | `PROJECT_{PROJECT_ID}_BUNNY_API_KEY` | No | Project-specific API key (overrides global) |
+| `PROJECT_{PROJECT_ID}_DEPLOY_BRANCH` | No | Branch to deploy from (e.g., `main`). If set, always deploys this branch regardless of which branch triggered the webhook. If not set, deploys from the webhook branch |
+
+#### DEPLOY_BRANCH Behavior
+
+The `DEPLOY_BRANCH` variable controls which branch is deployed when a webhook is received:
+
+| Webhook Branch | DEPLOY_BRANCH | Deploys From | Description |
+|----------------|---------------|--------------|-------------|
+| `main` | `pages` | `pages` | Always deploys the configured branch |
+| `pages` | - | `pages` | Deploys from webhook branch (no override) |
+| `docs` | `main` | `main` | Configured branch takes precedence |
+
+**Key points:**
+- If `DEPLOY_BRANCH` is set, **always** deploy that branch (ignores webhook branch)
+- If `DEPLOY_BRANCH` is not set, deploy from whichever branch triggered the webhook
+- Useful for platforms like Tangled that don't support branch filtering in webhook settings
 
 ### Example: Multiple Projects
 
@@ -163,8 +148,11 @@ PROJECT_SHOP_BUNNY_PULL_ZONE_DOMAIN=shop.example.com
 1. Go to your repository → **Settings → Webhooks**
 2. Add a new webhook and select **Forgejo** type
 3. Set **Target URL**: `http://your-server:3000/hook/{PROJECT_ID}`
-4. Set **Secret** to match `PROJECT_{PROJECT_ID}_WEBHOOK_SECRET`
-5. Trigger on **Push events** and save
+4. Set **HTTP Method** to **POST**
+5. Set **Content Type** to `application/json`
+6. Set **Secret** to match `PROJECT_{PROJECT_ID}_WEBHOOK_SECRET`
+7. Optionally set **Branch filter** to limit which branches trigger the webhook (e.g., `main` or `docs`)
+8. Trigger on **Push events** and save
 
 ### Tangled
 
@@ -173,6 +161,8 @@ PROJECT_SHOP_BUNNY_PULL_ZONE_DOMAIN=shop.example.com
 3. Set **Payload URL**: `http://your-server:3000/hook/{PROJECT_ID}`
 4. Set **Secret** to match `PROJECT_{PROJECT_ID}_WEBHOOK_SECRET`
 5. Select **Push events** and save
+
+Note: Tangled automatically sends `application/json` content type and does not require manual configuration.
 
 ## API Endpoints
 
@@ -248,64 +238,23 @@ use axum::http::HeaderMap;
 pub struct MyProvider;
 
 impl GitProvider for MyProvider {
-    fn verify_signature(
-        &self,
-        payload: &[u8],
-        headers: &HeaderMap,
-        secret: &str,
-    ) -> Result<String> {
-        // Extract signature from headers
-        let signature = headers
-            .get("X-MyProvider-Signature")
-            .ok_or_else(|| anyhow!("missing signature header"))?
-            .to_str()
-            .context("invalid signature header")?;
-
-        // Verify HMAC-SHA256 signature
-        use hmac::{Hmac, KeyInit, Mac};
-        use sha2::Sha256;
-
-        type HmacSha256 = Hmac<Sha256>;
-        let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
-            .map_err(|e| anyhow!("invalid secret: {}", e))?;
-        mac.update(payload);
-
-        let expected = hex::decode(signature).context("invalid signature hex")?;
-
-        mac.verify_slice(&expected)
-            .map_err(|_| anyhow!("signature verification failed"))?;
-
-        Ok(signature.to_string())
+    fn verify_signature(&self, payload: &[u8], headers: &HeaderMap, secret: &str) -> Result<String> {
+        // Extract and verify webhook signature
+        // Return signature string for deduplication cache
+        todo!()
     }
 
     fn parse_push_event(&self, payload: &[u8]) -> Result<PushEvent> {
-        let json: serde_json::Value = serde_json::from_slice(payload)
-            .context("invalid JSON")?;
-
-        let ref_name = json
-            .get("ref")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow!("missing ref"))?
-            .to_string();
-
-        let before = json.get("before").and_then(|v| v.as_str()).unwrap_or("");
-
-        let after = json
-            .get("after")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown");
-
-        // Detect test webhook: before and after are the same
-        let is_test = before == after && !before.is_empty();
-
-        Ok(PushEvent {
-            ref_name,
-            commit: after.to_string(),
-            is_test,
-        })
+        // Parse JSON payload and extract:
+        // - ref_name: Git reference (e.g., "refs/heads/main")
+        // - commit: The new commit SHA
+        // - is_test: true if before == after (test webhook)
+        todo!()
     }
 }
 ```
+
+See existing providers (`src/providers/forgejo.rs`, `src/providers/tangled.rs`) for full implementation examples.
 
 ### 3. Register the provider
 
@@ -435,10 +384,12 @@ MIT License - see LICENSE file for details
 1. Fork the repository
 2. Create a feature branch
 3. Make your changes
-4. Run tests: `cargo test`
-5. Run linting: `cargo clippy -- -D warnings`
-6. Format code: `cargo fmt`
-7. Submit a pull request
+4. Check compilation: `cargo check`
+5. Format code: `cargo fmt`
+6. Run linting: `cargo clippy -- -D warnings`
+7. Run tests: `cargo test`
+8. Build release: `cargo build --release`
+9. Submit a pull request
 
 ## Support
 

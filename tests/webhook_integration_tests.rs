@@ -26,6 +26,7 @@ fn create_test_config() -> Arc<Config> {
             bunny_pull_zone_id: "12345".to_string(),
             bunny_pull_zone_domain: "test.example.com".to_string(),
             bunny_api_key: Some("test-api-key".to_string()),
+            deploy_branch: None,
         },
     );
 

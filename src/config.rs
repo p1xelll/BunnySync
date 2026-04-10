@@ -11,6 +11,7 @@ pub struct ProjectConfig {
     pub bunny_pull_zone_id: String,
     pub bunny_pull_zone_domain: String,
     pub bunny_api_key: Option<String>,
+    pub deploy_branch: Option<String>,
 }
 
 impl fmt::Debug for ProjectConfig {
@@ -107,6 +108,7 @@ impl Config {
 
         let bunny_pull_zone_domain = get("BUNNY_PULL_ZONE_DOMAIN")?;
         let bunny_api_key = vars.get(&format!("{prefix}BUNNY_API_KEY")).cloned();
+        let deploy_branch = vars.get(&format!("{prefix}DEPLOY_BRANCH")).cloned();
 
         Ok(ProjectConfig {
             repo_url,
@@ -116,6 +118,7 @@ impl Config {
             bunny_pull_zone_id,
             bunny_pull_zone_domain,
             bunny_api_key,
+            deploy_branch,
         })
     }
 }

@@ -27,6 +27,8 @@ services:
       - PROJECT_MYAPP_BUNNY_PULL_ZONE_DOMAIN=${PROJECT_MYAPP_BUNNY_PULL_ZONE_DOMAIN}
       # Optional: project-specific API key
       # - PROJECT_MYAPP_BUNNY_API_KEY=${PROJECT_MYAPP_BUNNY_API_KEY}
+      # Optional: always deploy from specific branch (e.g., "main"). If not set, deploys from webhook branch.
+      # - PROJECT_MYAPP_DEPLOY_BRANCH=${PROJECT_MYAPP_DEPLOY_BRANCH}
 
       # Add more projects as needed:
       # - PROJECT_WEBSITE_REPO_URL=${PROJECT_WEBSITE_REPO_URL}

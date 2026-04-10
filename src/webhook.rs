@@ -17,7 +17,6 @@ use axum::{
     response::{IntoResponse, Json},
     routing::{get, post},
 };
-
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -36,40 +35,11 @@ const DELETE_CONCURRENCY: usize = 10;
 const PURGE_CONCURRENCY: usize = 5;
 const MAX_UPLOAD_RETRIES: u32 = 3;
 const RETRY_BASE_DELAY_MS: u64 = 100;
-const BUFFER_SIZE: usize = 64 * 1024; // 64KB buffer
+const BUFFER_SIZE: usize = 64 * 1024;
 
-#[derive(Serialize)]
-struct DeployResponse {
-    status: String,
-    uploaded: usize,
-    deleted: usize,
-    modified: usize,
-    purged: usize,
-    skipped: usize,
-    #[serde(rename = "dirs_deleted")]
-    dirs_deleted: usize,
-}
-
-impl DeployResponse {
-    fn success(
-        uploaded: usize,
-        deleted: usize,
-        modified: usize,
-        purged: usize,
-        skipped: usize,
-        dirs_deleted: usize,
-    ) -> Self {
-        Self {
-            status: "deployed".to_string(),
-            uploaded,
-            deleted,
-            modified,
-            purged,
-            skipped,
-            dirs_deleted,
-        }
-    }
-}
+// ---------------------------------------------------------------------------
+// Public API surface
+// ---------------------------------------------------------------------------
 
 #[derive(Clone)]
 pub struct AppState {
@@ -91,147 +61,31 @@ pub fn create_router(config: Arc<crate::config::Config>) -> Router {
         .with_state(state)
 }
 
-async fn health_handler() -> impl IntoResponse {
-    (StatusCode::OK, "healthy")
+// ---------------------------------------------------------------------------
+// Response types
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct DeployResponse {
+    status: String,
+    uploaded: usize,
+    deleted: usize,
+    modified: usize,
+    purged: usize,
+    skipped: usize,
+    dirs_deleted: usize,
 }
 
-async fn handle_webhook(
-    State(state): State<AppState>,
-    Path(project_id): Path<String>,
-    headers: HeaderMap,
-    body: axum::body::Bytes,
-) -> axum::response::Response {
-    info!(
-        event = "webhook.received",
-        project_id = %project_id,
-        "webhook received"
-    );
-
-    let project = match state.config.projects.get(&project_id) {
-        Some(p) => p,
-        None => {
-            warn!(
-                event = "webhook.project_not_found",
-                project_id = %project_id,
-                "project not found"
-            );
-            return (StatusCode::NOT_FOUND, "project not found").into_response();
-        }
-    };
-
-    let provider = match detect_provider(&headers) {
-        Some(p) => p,
-        None => {
-            warn!(event = "webhook.unknown_provider", "unknown provider");
-            return (StatusCode::BAD_REQUEST, "unknown provider").into_response();
-        }
-    };
-
-    let signature = match provider.verify_signature(&body, &headers, &project.webhook_secret) {
-        Ok(sig) => sig,
-        Err(e) => {
-            warn!(
-                event = "webhook.signature_verification_failed",
-                error = %e,
-                "signature verification failed"
-            );
-            return (StatusCode::UNAUTHORIZED, "invalid signature").into_response();
-        }
-    };
-
-    if state.signature_cache.contains(&signature).await {
-        warn!(
-            event = "webhook.replay_detected",
-            project_id = %project_id,
-            "replay attack detected - signature already used"
-        );
-        return (StatusCode::CONFLICT, "duplicate webhook").into_response();
-    }
-
-    state.signature_cache.insert(signature).await;
-
-    let push_event = match provider.parse_push_event(&body) {
-        Ok(e) => e,
-        Err(e) => {
-            warn!(
-                event = "webhook.parse_failed",
-                error = %e,
-                "failed to parse push event"
-            );
-            return (StatusCode::BAD_REQUEST, "invalid payload").into_response();
-        }
-    };
-
-    // Check if this is a test webhook (before == after)
-    if push_event.is_test {
-        info!(
-            event = "webhook.test",
-            project_id = %project_id,
-            "test webhook detected - no deploy performed"
-        );
-        return (
-            StatusCode::OK,
-            "test webhook received - signature valid, no deploy",
-        )
-            .into_response();
-    }
-
-    info!(
-        event = "deploy.started",
-        project_id = %project_id,
-        ref_name = %push_event.ref_name,
-        commit = %push_event.commit,
-        "starting deployment"
-    );
-
-    let _deploy_permit: OwnedSemaphorePermit = match state.deploy_queue.acquire(&project_id).await {
-        Some(permit) => permit,
-        None => {
-            warn!(
-                event = "deploy.already_in_progress",
-                project_id = %project_id,
-                "deploy already in progress for this project"
-            );
-            return (StatusCode::CONFLICT, "deploy already in progress").into_response();
-        }
-    };
-
-    let api_key = project
-        .bunny_api_key
-        .clone()
-        .unwrap_or_else(|| state.config.bunny_api_key.clone());
-
-    match deploy_project(project, &push_event, api_key).await {
-        Ok(stats) => {
-            info!(
-                event = "deploy.completed",
-                project_id = %project_id,
-                uploaded = stats.uploaded,
-                deleted = stats.deleted,
-                modified = stats.modified,
-                purged = stats.purged,
-                skipped = stats.skipped,
-                dirs_deleted = stats.dirs_deleted,
-                "deploy completed successfully"
-            );
-            let response = DeployResponse::success(
-                stats.uploaded,
-                stats.deleted,
-                stats.modified,
-                stats.purged,
-                stats.skipped,
-                stats.dirs_deleted,
-            );
-            (StatusCode::OK, Json(response)).into_response()
-        }
-        Err(e) => {
-            error!(
-                event = "deploy.failed",
-                project_id = %project_id,
-                error = %e,
-                "deploy failed"
-            );
-            (StatusCode::INTERNAL_SERVER_ERROR, "deploy failed").into_response()
+impl DeployResponse {
+    fn success(stats: &DeployStats) -> Self {
+        Self {
+            status: "deployed".to_string(),
+            uploaded: stats.uploaded,
+            deleted: stats.deleted,
+            modified: stats.modified,
+            purged: stats.purged,
+            skipped: stats.skipped,
+            dirs_deleted: stats.dirs_deleted,
         }
     }
 }
@@ -246,36 +100,168 @@ struct DeployStats {
     dirs_deleted: usize,
 }
 
+// ---------------------------------------------------------------------------
+// Handlers
+// ---------------------------------------------------------------------------
+
+async fn health_handler() -> impl IntoResponse {
+    (StatusCode::OK, "healthy")
+}
+
+async fn handle_webhook(
+    State(state): State<AppState>,
+    Path(project_id): Path<String>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    info!(event = "webhook.received", project_id = %project_id);
+
+    let project = match state.config.projects.get(&project_id) {
+        Some(p) => p,
+        None => {
+            warn!(event = "webhook.project_not_found", project_id = %project_id);
+            return (StatusCode::NOT_FOUND, "project not found").into_response();
+        }
+    };
+
+    let provider = match detect_provider(&headers) {
+        Some(p) => p,
+        None => {
+            warn!(event = "webhook.unknown_provider");
+            return (StatusCode::BAD_REQUEST, "unknown provider").into_response();
+        }
+    };
+
+    let signature = match provider.verify_signature(&body, &headers, &project.webhook_secret) {
+        Ok(sig) => sig,
+        Err(e) => {
+            warn!(event = "webhook.signature_verification_failed", error = %e);
+            return (StatusCode::UNAUTHORIZED, "invalid signature").into_response();
+        }
+    };
+
+    if state.signature_cache.contains(&signature).await {
+        warn!(
+            event = "webhook.replay_detected",
+            project_id = %project_id,
+            "replay attack detected — signature already used"
+        );
+        return (StatusCode::CONFLICT, "duplicate webhook").into_response();
+    }
+
+    state.signature_cache.insert(signature).await;
+
+    let push_event = match provider.parse_push_event(&body) {
+        Ok(e) => e,
+        Err(e) => {
+            warn!(event = "webhook.parse_failed", error = %e);
+            return (StatusCode::BAD_REQUEST, "invalid payload").into_response();
+        }
+    };
+
+    // Respond 200 to test webhooks so the provider doesn't flag the endpoint as
+    // unhealthy; we just don't act on them.
+    if push_event.is_test {
+        info!(event = "webhook.test", project_id = %project_id);
+        return (
+            StatusCode::OK,
+            "test webhook received — signature valid, no deploy",
+        )
+            .into_response();
+    }
+
+    // Strip the "refs/heads/" prefix once and reuse everywhere below.
+    let webhook_branch = push_event
+        .ref_name
+        .strip_prefix("refs/heads/")
+        .unwrap_or(&push_event.ref_name);
+
+    // Resolve which branch to deploy from:
+    // - Use configured DEPLOY_BRANCH if set
+    // - Otherwise deploy from the webhook branch (deploy what was pushed)
+    let deploy_branch = project.deploy_branch.as_deref().unwrap_or(webhook_branch);
+
+    // Log when we deploy from a different branch than the webhook
+    if webhook_branch != deploy_branch {
+        info!(
+            event = "webhook.branch_override",
+            project_id = %project_id,
+            webhook_branch = %webhook_branch,
+            deploy_branch = %deploy_branch,
+        );
+    }
+
+    info!(
+        event = "deploy.started",
+        project_id = %project_id,
+        webhook_branch = %webhook_branch,
+        deploy_branch = %deploy_branch,
+        commit = %push_event.commit,
+    );
+
+    let _deploy_permit: OwnedSemaphorePermit = match state.deploy_queue.acquire(&project_id).await {
+        Some(permit) => permit,
+        None => {
+            warn!(event = "deploy.already_in_progress", project_id = %project_id);
+            return (StatusCode::CONFLICT, "deploy already in progress").into_response();
+        }
+    };
+
+    let api_key = project
+        .bunny_api_key
+        .clone()
+        .unwrap_or_else(|| state.config.bunny_api_key.clone());
+
+    match deploy_project(project, deploy_branch, api_key).await {
+        Ok(stats) => {
+            info!(
+                event = "deploy.completed",
+                project_id = %project_id,
+                uploaded = stats.uploaded,
+                deleted = stats.deleted,
+                modified = stats.modified,
+                purged = stats.purged,
+                skipped = stats.skipped,
+                dirs_deleted = stats.dirs_deleted,
+            );
+            (StatusCode::OK, Json(DeployResponse::success(&stats))).into_response()
+        }
+        Err(e) => {
+            error!(event = "deploy.failed", project_id = %project_id, error = %e);
+            (StatusCode::INTERNAL_SERVER_ERROR, "deploy failed").into_response()
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Deploy pipeline
+// ---------------------------------------------------------------------------
+
 async fn deploy_project(
     project: &ProjectConfig,
-    push_event: &crate::providers::PushEvent,
+    branch: &str,
     api_key: String,
 ) -> Result<DeployStats> {
     let temp_dir = TempDir::new().context("failed to create temp directory")?;
     let repo_path = temp_dir.path().join("repo");
 
-    let branch = push_event
-        .ref_name
-        .strip_prefix("refs/heads/")
-        .unwrap_or(&push_event.ref_name);
     clone_repo(&project.repo_url, &repo_path, branch).await?;
 
     let local_files = collect_local_files(&repo_path).await?;
 
-    let storage = BunnyStorage::new(
+    let storage = Arc::new(BunnyStorage::new(
         project.bunny_storage_zone.clone(),
         project.bunny_storage_password.clone(),
-    );
+    ));
 
     let remote_files = storage.list_files("").await?;
 
     debug!(
         event = "deploy.file_counts",
-        local_count = local_files.files.len(),
-        remote_count = remote_files.files.len(),
+        local_files = local_files.files.len(),
+        remote_files = remote_files.files.len(),
         local_dirs = local_files.directories.len(),
         remote_dirs = remote_files.directories.len(),
-        "local vs remote file counts"
     );
 
     let deltas = compute_delta(
@@ -285,7 +271,6 @@ async fn deploy_project(
         &remote_files.directories,
     );
 
-    // Calculate stats before consuming the vectors
     let uploaded_count = get_uploads(&deltas).len();
     let deleted_count = get_deletions(&deltas).len();
     let modified_count = count_modified(&deltas);
@@ -295,36 +280,26 @@ async fn deploy_project(
 
     info!(
         event = "delta.computed",
-        local_files = local_files.files.len(),
-        remote_files = remote_files.files.len(),
-        local_dirs = local_files.directories.len(),
-        remote_dirs = remote_files.directories.len(),
         uploads = uploaded_count,
         deletions = deleted_count,
         dir_deletions = dir_deletion_count,
         modified = modified_count,
         skipped = skipped_count,
-        "delta computed"
     );
 
-    // Execute uploads in parallel with concurrency limit
-    let semaphore = Arc::new(Semaphore::new(UPLOAD_CONCURRENCY));
-    let storage = Arc::new(BunnyStorage::new(
-        project.bunny_storage_zone.clone(),
-        project.bunny_storage_password.clone(),
-    ));
+    // --- uploads -----------------------------------------------------------
 
-    let uploads = get_uploads(&deltas);
-    let mut upload_tasks = JoinSet::new();
+    let upload_semaphore = Arc::new(Semaphore::new(UPLOAD_CONCURRENCY));
+    let mut upload_tasks: JoinSet<Result<()>> = JoinSet::new();
 
-    for delta in uploads {
+    for delta in get_uploads(&deltas) {
         let storage = Arc::clone(&storage);
         let path = repo_path.join(&delta.path);
         let remote_path = delta.path.clone();
-        let permit = Arc::clone(&semaphore);
+        let sem = Arc::clone(&upload_semaphore);
 
         upload_tasks.spawn(async move {
-            let _permit = permit.acquire().await;
+            let _permit = sem.acquire().await;
             upload_with_retry(&storage, &path, &remote_path, MAX_UPLOAD_RETRIES).await
         });
     }
@@ -333,18 +308,18 @@ async fn deploy_project(
         result??;
     }
 
-    // Execute deletions in parallel
-    let deletions = get_deletions(&deltas);
-    let delete_semaphore = Arc::new(Semaphore::new(DELETE_CONCURRENCY));
-    let mut delete_tasks = JoinSet::new();
+    // --- file deletions ----------------------------------------------------
 
-    for delta in deletions {
+    let delete_semaphore = Arc::new(Semaphore::new(DELETE_CONCURRENCY));
+    let mut delete_tasks: JoinSet<Result<()>> = JoinSet::new();
+
+    for delta in get_deletions(&deltas) {
         let storage = Arc::clone(&storage);
         let path = delta.path.clone();
-        let permit = Arc::clone(&delete_semaphore);
+        let sem = Arc::clone(&delete_semaphore);
 
         delete_tasks.spawn(async move {
-            let _permit = permit.acquire().await;
+            let _permit = sem.acquire().await;
             storage.delete_file(&path).await
         });
     }
@@ -353,50 +328,43 @@ async fn deploy_project(
         result??;
     }
 
-    // Delete empty directories after all files are deleted
-    // Sort directories by depth (deepest first) to avoid "not empty" errors
-    let mut dir_deletions_sorted: Vec<_> = dir_deletions.iter().map(|d| d.path.clone()).collect();
-    dir_deletions_sorted.sort_by(|a, b| {
-        let a_depth = a.matches('/').count();
-        let b_depth = b.matches('/').count();
-        b_depth.cmp(&a_depth) // Reverse order: deepest first
-    });
+    // --- directory deletions -----------------------------------------------
+    // Process deepest paths first so we never hit "directory not empty".
 
-    let mut dir_delete_tasks = JoinSet::new();
-    for dir_path in dir_deletions_sorted {
+    let mut dir_paths: Vec<String> = dir_deletions.iter().map(|d| d.path.clone()).collect();
+    dir_paths.sort_unstable_by_key(|p| std::cmp::Reverse(p.matches('/').count()));
+
+    let mut dir_delete_tasks: JoinSet<Result<()>> = JoinSet::new();
+    for dir_path in dir_paths {
         let storage = Arc::clone(&storage);
         dir_delete_tasks.spawn(async move { storage.delete_directory(&dir_path).await });
     }
 
-    let mut successful_dir_deletions = 0;
+    let mut successful_dir_deletions: usize = 0;
     while let Some(result) = dir_delete_tasks.join_next().await {
         match result {
             Ok(Ok(())) => successful_dir_deletions += 1,
-            Ok(Err(e)) => {
-                warn!(event = "dir_delete.failed", error = %e);
-            }
-            Err(e) => {
-                warn!(event = "dir_delete.task_failed", error = %e);
-            }
+            Ok(Err(e)) => warn!(event = "dir_delete.failed", error = %e),
+            Err(e) => warn!(event = "dir_delete.task_panicked", error = %e),
         }
     }
 
-    // Purge CDN cache in parallel
+    // --- CDN purge ---------------------------------------------------------
+
     let purge_urls = get_purge_urls(&deltas, &project.bunny_pull_zone_domain);
     let purged_count = purge_urls.len();
 
     if !purge_urls.is_empty() {
-        let api_key = project
+        let cdn_api_key = project
             .bunny_api_key
             .clone()
             .unwrap_or_else(|| api_key.clone());
 
-        let cdn = BunnyCdn::new(api_key);
-        let results = cdn
+        let cdn = BunnyCdn::new(cdn_api_key);
+        for (url, result) in cdn
             .purge_urls_parallel(&purge_urls, PURGE_CONCURRENCY)
-            .await;
-
-        for (url, result) in results {
+            .await
+        {
             if let Err(e) = result {
                 warn!(event = "purge.failed", url = %url, error = %e);
             }
@@ -413,81 +381,50 @@ async fn deploy_project(
     })
 }
 
-async fn upload_with_retry(
-    storage: &BunnyStorage,
-    path: &std::path::Path,
-    remote_path: &str,
-    max_retries: u32,
-) -> Result<()> {
-    let mut last_error = None;
-
-    for attempt in 1..=max_retries {
-        match storage.upload_file_from_path(remote_path, path).await {
-            Ok(()) => return Ok(()),
-            Err(e) => {
-                warn!(
-                    event = "upload.retry",
-                    remote_path = %remote_path,
-                    attempt = attempt,
-                    max_retries = max_retries,
-                    error = %e,
-                    "upload failed, will retry"
-                );
-                last_error = Some(e);
-
-                if attempt < max_retries {
-                    let delay = RETRY_BASE_DELAY_MS * attempt as u64;
-                    tokio::time::sleep(Duration::from_millis(delay)).await;
-                }
-            }
-        }
-    }
-
-    Err(last_error
-        .map(|e| anyhow::anyhow!("upload failed after {} retries: {}", max_retries, e))
-        .unwrap_or_else(|| anyhow::anyhow!("upload failed")))
-}
+// ---------------------------------------------------------------------------
+// Git
+// ---------------------------------------------------------------------------
 
 async fn clone_repo(repo_url: &str, dest: &std::path::Path, branch: &str) -> Result<()> {
     tokio::task::spawn_blocking({
         let repo_url = repo_url.to_string();
         let dest = dest.to_path_buf();
         let branch = branch.to_string();
-        move || {
-            use gix::bstr::ByteSlice;
 
+        move || {
             std::fs::create_dir_all(&dest)?;
 
             let url = gix::url::parse(repo_url.as_str().into())
-                .with_context(|| "failed to parse repository URL")?;
+                .context("failed to parse repository URL")?;
 
-            let mut prepare_clone =
-                gix::prepare_clone(url, &dest).with_context(|| "failed to prepare clone")?;
+            // Fetch only the single branch we care about — no reason to pull
+            // the entire remote ref namespace for a deploy pipeline.
+            let refspec = format!("+refs/heads/{branch}:refs/remotes/origin/{branch}");
 
-            let (mut prepare_checkout, outcome) = prepare_clone
+            let prepare_clone = gix::prepare_clone(url, &dest)
+                .context("failed to prepare clone")?
+                // with_ref_name() tells gix which ref to check out via
+                // main_worktree(), available since gix 0.64.
+                .with_ref_name(Some(branch.as_str()))
+                .with_context(|| format!("invalid ref name '{branch}'"))?;
+
+            // Replace the default wildcard refspec with our single-branch one.
+            let mut prepare_clone = prepare_clone.configure_remote(move |mut remote| {
+                remote = remote
+                    .with_refspecs(Some(refspec.as_str()), gix::remote::Direction::Fetch)
+                    .context("failed to configure single-branch refspec")?;
+                Ok(remote)
+            });
+
+            let (mut prepare_checkout, _outcome) = prepare_clone
                 .fetch_then_checkout(gix::progress::Discard, &gix::interrupt::IS_INTERRUPTED)
-                .with_context(|| "failed to fetch repository")?;
+                .with_context(|| format!("failed to fetch branch '{branch}'"))?;
 
-            let commit_id = outcome
-                .ref_map
-                .mappings
-                .iter()
-                .find_map(|m| {
-                    let local_ref = m.local.as_ref()?;
-                    let local_str = local_ref.as_bstr().to_str().ok()?;
-                    if local_str.contains(&format!("origin/{branch}")) {
-                        m.remote.as_id()
-                    } else {
-                        None
-                    }
-                })
-                .ok_or_else(|| anyhow::anyhow!("branch '{branch}' not found in remote"))?;
-
-            let (repo, _) = prepare_checkout
+            // main_worktree() honours the ref set above and performs the
+            // checkout — no manual tree walk required.
+            let (_repo, _outcome) = prepare_checkout
                 .main_worktree(gix::progress::Discard, &gix::interrupt::IS_INTERRUPTED)
-                .with_context(|| "failed to checkout main worktree")?;
-
-            let _ = (repo, commit_id);
+                .context("failed to checkout worktree")?;
 
             Ok::<_, anyhow::Error>(())
         }
@@ -498,11 +435,53 @@ async fn clone_repo(repo_url: &str, dest: &std::path::Path, branch: &str) -> Res
     Ok(())
 }
 
-async fn collect_local_files(dir: &std::path::Path) -> Result<LocalFileSet> {
-    let mut files = HashMap::new();
-    let mut directories = Vec::new();
+// ---------------------------------------------------------------------------
+// Storage helpers
+// ---------------------------------------------------------------------------
 
-    // Use blocking walkdir in spawn_blocking for large directories
+async fn upload_with_retry(
+    storage: &BunnyStorage,
+    path: &std::path::Path,
+    remote_path: &str,
+    max_retries: u32,
+) -> Result<()> {
+    let mut last_err = None;
+
+    for attempt in 1..=max_retries {
+        match storage.upload_file_from_path(remote_path, path).await {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                warn!(
+                    event = "upload.retry",
+                    remote_path = %remote_path,
+                    attempt,
+                    max_retries,
+                    error = %e,
+                );
+                last_err = Some(e);
+
+                if attempt < max_retries {
+                    tokio::time::sleep(Duration::from_millis(
+                        RETRY_BASE_DELAY_MS * u64::from(attempt),
+                    ))
+                    .await;
+                }
+            }
+        }
+    }
+
+    Err(last_err
+        .map(|e| anyhow::anyhow!("upload failed after {max_retries} retries: {e}"))
+        .unwrap_or_else(|| anyhow::anyhow!("upload failed")))
+}
+
+// ---------------------------------------------------------------------------
+// Filesystem helpers
+// ---------------------------------------------------------------------------
+
+async fn collect_local_files(dir: &std::path::Path) -> Result<LocalFileSet> {
+    // Collect directory entries on a blocking thread — WalkDir does synchronous
+    // syscalls and we don't want to hold the async executor.
     let dir_path = dir.to_path_buf();
     let entries: Vec<_> = tokio::task::spawn_blocking(move || {
         WalkDir::new(&dir_path)
@@ -511,23 +490,39 @@ async fn collect_local_files(dir: &std::path::Path) -> Result<LocalFileSet> {
             .collect()
     })
     .await
-    .context("walkdir task failed")?;
+    .context("walkdir task panicked")?;
 
-    for entry in entries {
-        let path = entry.path();
-        let relative = path.strip_prefix(dir)?;
+    // Compute checksums in parallel, bounded by the same concurrency limit we
+    // use for uploads — both are I/O bound against local disk.
+    let semaphore = Arc::new(Semaphore::new(UPLOAD_CONCURRENCY));
+    let mut checksum_tasks: JoinSet<Result<Option<(String, String)>>> = JoinSet::new();
+    let mut directories: Vec<String> = Vec::new();
+
+    for entry in &entries {
+        let relative = entry.path().strip_prefix(dir)?;
         let key = relative.to_string_lossy().replace('\\', "/");
 
-        // Skip root and .git directory
-        if key.is_empty() || key.starts_with(".git/") || key == ".git" {
+        if key.is_empty() || key == ".git" || key.starts_with(".git/") {
             continue;
         }
 
         if entry.file_type().is_dir() {
             directories.push(key);
         } else if entry.file_type().is_file() {
-            // Read file async with buffered I/O
-            let checksum = compute_file_checksum(path).await?;
+            let path = entry.path().to_path_buf();
+            let sem = Arc::clone(&semaphore);
+
+            checksum_tasks.spawn(async move {
+                let _permit = sem.acquire().await;
+                let checksum = compute_file_checksum(&path).await?;
+                Ok(Some((key, checksum)))
+            });
+        }
+    }
+
+    let mut files = HashMap::with_capacity(checksum_tasks.len());
+    while let Some(result) = checksum_tasks.join_next().await {
+        if let Some((key, checksum)) = result?? {
             files.insert(key, checksum);
         }
     }
@@ -536,20 +531,19 @@ async fn collect_local_files(dir: &std::path::Path) -> Result<LocalFileSet> {
 }
 
 async fn compute_file_checksum(path: &std::path::Path) -> Result<String> {
-    let mut file = fs::File::open(path).await.context("failed to open file")?;
+    let mut file = fs::File::open(path)
+        .await
+        .with_context(|| format!("failed to open '{}'", path.display()))?;
 
     let mut hasher = Sha256::new();
-    let mut buffer = vec![0u8; BUFFER_SIZE];
+    let mut buf = vec![0u8; BUFFER_SIZE];
 
     loop {
-        let n = file
-            .read(&mut buffer)
-            .await
-            .context("failed to read file")?;
+        let n = file.read(&mut buf).await.context("failed to read file")?;
         if n == 0 {
             break;
         }
-        hasher.update(&buffer[..n]);
+        hasher.update(&buf[..n]);
     }
 
     Ok(hex::encode_upper(hasher.finalize()))
