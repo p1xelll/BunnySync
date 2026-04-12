@@ -1,6 +1,7 @@
 use axum::http::HeaderMap;
 
 pub mod forgejo;
+pub mod github;
 pub mod tangled;
 
 pub trait GitProvider: Send + Sync {
@@ -30,6 +31,10 @@ pub fn detect_provider(headers: &HeaderMap) -> Option<Box<dyn GitProvider>> {
     // Check for Tangled (tangled.org - decentralized Git hosting on AT Protocol)
     else if headers.contains_key("X-Tangled-Event") {
         Some(Box::new(tangled::TangledProvider))
+    }
+    // Check for GitHub (X-GitHub-Event header)
+    else if headers.contains_key("X-GitHub-Event") {
+        Some(Box::new(github::GithubProvider))
     }
     // No matching provider found
     else {

@@ -1,12 +1,12 @@
 # BunnySync
 
-A webhook receiver that automatically deploys Git repositories to BunnyCDN Storage zones. Supports Forgejo (Codeberg) and Tangled webhooks with automatic CDN cache purging.
+A webhook receiver that automatically deploys Git repositories to BunnyCDN Storage zones. Supports Forgejo (Codeberg), Tangled and GitHub webhooks with automatic CDN cache purging.
 
 **Docker Hub:** https://hub.docker.com/r/p1xelll/bunnysync
 
 ## Features
 
-- **Webhook Support**: Receives push events from Forgejo (Codeberg) and Tangled
+- **Webhook Support**: Receives push events from Forgejo (Codeberg), Tangled and GitHub
 - **Automatic Deployments**: Clones repo, computes delta, uploads changed files
 - **CDN Integration**: Automatically purges BunnyCDN cache for modified files
 - **Multi-Architecture**: Docker images available for AMD64 and ARM64
@@ -143,6 +143,18 @@ PROJECT_SHOP_BUNNY_PULL_ZONE_DOMAIN=shop.example.com
 
 ## Webhook Setup
 
+### GitHub
+
+1. Go to your repository → **Settings → Webhooks**
+2. Click **Add webhook**
+3. Set **Payload URL**: `http://your-server:3000/hook/{PROJECT_ID}`
+4. Set **Content type** to `application/json`
+5. Set **Secret** to match `PROJECT_{PROJECT_ID}_WEBHOOK_SECRET`
+6. Choose **Just the push event**
+7. Click **Add webhook**
+
+Note: GitHub automatically includes the signature in the `X-Hub-Signature-256` header using HMAC-SHA256.
+
 ### Forgejo (Codeberg)
 
 1. Go to your repository → **Settings → Webhooks**
@@ -163,6 +175,19 @@ PROJECT_SHOP_BUNNY_PULL_ZONE_DOMAIN=shop.example.com
 5. Select **Push events** and save
 
 Note: Tangled automatically sends `application/json` content type and does not require manual configuration.
+
+### GitHub
+
+1. Go to your repository → **Settings → Webhooks**
+2. Click **Add webhook**
+3. Set **Payload URL**: `http://your-server:3000/hook/{PROJECT_ID}`
+4. Set **Content type** to `application/json`
+5. Set **Secret** to match `PROJECT_{PROJECT_ID}_WEBHOOK_SECRET`
+6. Choose **Just the push event**
+7. Click **Add webhook**
+
+Note: GitHub automatically includes the signature in the `X-Hub-Signature-256` header using HMAC-SHA256.
+
 
 ## API Endpoints
 
@@ -213,6 +238,7 @@ The application is built with:
 ## Adding a New Provider
 
 BunnySync uses a provider system to support different Git hosting platforms. Currently supported:
+- **GitHub** (world's largest Git hosting platform)
 - **Forgejo** (used by Codeberg)
 - **Tangled** (decentralized Git hosting on AT Protocol)
 
@@ -262,6 +288,7 @@ Update `src/providers/mod.rs` to add your provider:
 
 ```rust
 pub mod forgejo;
+pub mod github;
 pub mod tangled;
 pub mod myprovider;  // Add this line
 
@@ -273,6 +300,10 @@ pub fn detect_provider(headers: &HeaderMap) -> Option<Box<dyn GitProvider>> {
     // Check for Tangled
     else if headers.contains_key("X-Tangled-Event") {
         Some(Box::new(tangled::TangledProvider))
+    }
+    // Check for GitHub
+    else if headers.contains_key("X-GitHub-Event") {
+        Some(Box::new(github::GithubProvider))
     }
     // Add your provider here
     else if headers.contains_key("X-MyProvider-Event") {
@@ -364,15 +395,6 @@ cargo run --release
 
 ```bash
 docker build -t bunnysync:local .
-```
-
-### Multi-arch build with buildx
-
-```bash
-docker buildx build \
-  --platform linux/amd64,linux/arm64 \
-  -t p1xelll/bunnysync:latest \
-  --push .
 ```
 
 ## License
