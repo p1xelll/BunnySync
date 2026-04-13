@@ -1,8 +1,11 @@
-# ![BunnySync Logo](docs/logo.svg) BunnySync
+# <img src="docs/logo.svg" alt="BunnySync Logo" width="45" valign="middle"> BunnySync
 
 A webhook receiver that automatically deploys Git repositories to BunnyCDN Storage zones. Supports Forgejo (Codeberg), Tangled, GitHub, and GitLab webhooks with automatic CDN cache purging.
 
+[![Rust](https://img.shields.io/badge/built%20with-Rust-dca282.svg?style=flat-square&logo=rust)](https://www.rust-lang.org/)
 [![Docker Pulls](https://img.shields.io/docker/pulls/p1xelll/bunnysync?style=flat-square&logo=docker)](https://hub.docker.com/r/p1xelll/bunnysync)
+
+---
 
 ## Features
 
