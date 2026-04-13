@@ -2,6 +2,7 @@ use axum::http::HeaderMap;
 
 pub mod forgejo;
 pub mod github;
+pub mod gitlab;
 pub mod tangled;
 
 pub trait GitProvider: Send + Sync {
@@ -35,6 +36,10 @@ pub fn detect_provider(headers: &HeaderMap) -> Option<Box<dyn GitProvider>> {
     // Check for GitHub (X-GitHub-Event header)
     else if headers.contains_key("X-GitHub-Event") {
         Some(Box::new(github::GithubProvider))
+    }
+    // Check for GitLab (X-Gitlab-Event header)
+    else if headers.contains_key("X-Gitlab-Event") {
+        Some(Box::new(gitlab::GitlabProvider))
     }
     // No matching provider found
     else {

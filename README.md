@@ -1,12 +1,12 @@
 # BunnySync
 
-A webhook receiver that automatically deploys Git repositories to BunnyCDN Storage zones. Supports Forgejo (Codeberg), Tangled and GitHub webhooks with automatic CDN cache purging.
+A webhook receiver that automatically deploys Git repositories to BunnyCDN Storage zones. Supports Forgejo (Codeberg), Tangled, GitHub, and GitLab webhooks with automatic CDN cache purging.
 
 **Docker Hub:** https://hub.docker.com/r/p1xelll/bunnysync
 
 ## Features
 
-- **Webhook Support**: Receives push events from Forgejo (Codeberg), Tangled and GitHub
+- **Webhook Support**: Receives push events from Forgejo (Codeberg), Tangled, GitHub, and GitLab
 - **Automatic Deployments**: Clones repo, computes delta, uploads changed files
 - **CDN Integration**: Automatically purges BunnyCDN cache for modified files
 - **Multi-Architecture**: Docker images available for AMD64 and ARM64
@@ -143,18 +143,6 @@ PROJECT_SHOP_BUNNY_PULL_ZONE_DOMAIN=shop.example.com
 
 ## Webhook Setup
 
-### GitHub
-
-1. Go to your repository → **Settings → Webhooks**
-2. Click **Add webhook**
-3. Set **Payload URL**: `http://your-server:3000/hook/{PROJECT_ID}`
-4. Set **Content type** to `application/json`
-5. Set **Secret** to match `PROJECT_{PROJECT_ID}_WEBHOOK_SECRET`
-6. Choose **Just the push event**
-7. Click **Add webhook**
-
-Note: GitHub automatically includes the signature in the `X-Hub-Signature-256` header using HMAC-SHA256.
-
 ### Forgejo (Codeberg)
 
 1. Go to your repository → **Settings → Webhooks**
@@ -187,6 +175,18 @@ Note: Tangled automatically sends `application/json` content type and does not r
 7. Click **Add webhook**
 
 Note: GitHub automatically includes the signature in the `X-Hub-Signature-256` header using HMAC-SHA256.
+
+### GitLab
+
+1. Go to your repository → **Settings → Webhooks**
+2. Click **Add new webhook**
+3. Set **URL**: `http://your-server:3000/hook/{PROJECT_ID}`
+4. Set **Secret token** to match `PROJECT_{PROJECT_ID}_WEBHOOK_SECRET`
+5. Select **Push events** trigger
+6. Optionally configure **Wildcard pattern** to limit which branches trigger the webhook (e.g., `main` or `release/*`)
+7. Click **Add webhook**
+
+Note: GitLab sends the secret token in the `X-Gitlab-Token` header. Webhook deduplication uses GitLab's `Idempotency-Key` header to prevent replay attacks while allowing legitimate retries.
 
 
 ## API Endpoints
@@ -239,6 +239,7 @@ The application is built with:
 
 BunnySync uses a provider system to support different Git hosting platforms. Currently supported:
 - **GitHub** (world's largest Git hosting platform)
+- **GitLab** (popular open-source DevOps platform, gitlab.com and self-hosted)
 - **Forgejo** (used by Codeberg)
 - **Tangled** (decentralized Git hosting on AT Protocol)
 
