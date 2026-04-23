@@ -489,4 +489,4 @@ MIT License - see LICENSE file for details
 
 ## Support
 
-- Issues: https://codeberg.org/p1xel/BunnySync/issues
+- Issues: https://todo.sr.ht/~p1xel/BunnySync
