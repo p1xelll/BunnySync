@@ -1,4 +1,4 @@
-# <img src="docs/logo.svg" alt="BunnySync Logo" width="45" valign="middle"> BunnySync
+# BunnySync
 
 A webhook receiver that automatically deploys Git repositories to BunnyCDN Storage zones. Supports SourceHut, Forgejo (Codeberg), Tangled, GitHub and GitLab webhooks with automatic CDN cache purging.
 
