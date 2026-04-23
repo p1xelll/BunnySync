@@ -5,8 +5,8 @@ edition = "2024"
 license = "MIT"
 
 [dependencies]
-axum = "0.8.8"
-tokio = { version = "1.51.1", features = ["rt-multi-thread", "macros", "sync", "fs", "time", "io-util"] }
+axum = "0.8.9"
+tokio = { version = "1.52.1", features = ["rt-multi-thread", "macros", "sync", "fs", "time", "io-util"] }
 reqwest = { version = "0.13.2", default-features = false, features = ["json", "rustls", "http2"] }
 gix = { version = "0.81.0", default-features = false, features = ["blocking-network-client", "blocking-http-transport-reqwest-rust-tls", "worktree-mutation", "sha1", "parallel"] }
 hmac = "0.13"
@@ -16,6 +16,8 @@ serde_json = "1.0.149"
 tower = "0.5.3"
 tower-http = "0.6.8"
 hex = "0.4.3"
+ed25519-dalek = "2"
+base64 = "0.22"
 anyhow = "1.0.102"
 tracing = "0.1.44"
 tracing-subscriber = "0.3.23"

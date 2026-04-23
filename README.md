@@ -1,6 +1,6 @@
 # <img src="docs/logo.svg" alt="BunnySync Logo" width="45" valign="middle"> BunnySync
 
-A webhook receiver that automatically deploys Git repositories to BunnyCDN Storage zones. Supports Forgejo (Codeberg), Tangled, GitHub, and GitLab webhooks with automatic CDN cache purging.
+A webhook receiver that automatically deploys Git repositories to BunnyCDN Storage zones. Supports SourceHut, Forgejo (Codeberg), Tangled, GitHub and GitLab webhooks with automatic CDN cache purging.
 
 [![Rust](https://img.shields.io/badge/built%20with-Rust-dca282.svg?style=flat-square&logo=rust)](https://www.rust-lang.org/)
 [![Docker Pulls](https://img.shields.io/docker/pulls/p1xelll/bunnysync?style=flat-square&logo=docker)](https://hub.docker.com/r/p1xelll/bunnysync)
@@ -9,12 +9,12 @@ A webhook receiver that automatically deploys Git repositories to BunnyCDN Stora
 
 ## Features
 
-- **Webhook Support**: Receives push events from Forgejo (Codeberg), Tangled, GitHub, and GitLab
+- **Webhook Support**: Receives push events from SourceHut, Forgejo (Codeberg), Tangled, GitHub and GitLab
 - **Automatic Deployments**: Clones repo, computes delta, uploads changed files
 - **CDN Integration**: Automatically purges BunnyCDN cache for modified files
 - **Multi-Architecture**: Docker images available for AMD64 and ARM64
 - **Concurrent Operations**: Parallel file uploads/deletions with configurable limits
-- **Signature Verification**: HMAC-SHA256 webhook signature validation
+- **Signature Verification**: HMAC-SHA256 and Ed25519 webhook signature validation
 - **Replay Protection**: Signature deduplication prevents replay attacks
 - **Queue Management**: Per-project deployment queue prevents concurrent deploys
 
@@ -70,7 +70,7 @@ WEBSITE_STORAGE_PASSWORD=your-storage-zone-password
 
 ```bash
 # Download compose file
-wget https://codeberg.org/p1xel/BunnySync/raw/branch/main/docker-compose.yml
+wget https://git.sr.ht/~p1xel/BunnySync/tree/main/item/docker-compose.yml
 
 # Create environment file
 cp .env.example .env
@@ -122,7 +122,7 @@ The `DEPLOY_BRANCH` variable controls which branch is deployed when a webhook is
 **Key points:**
 - If `DEPLOY_BRANCH` is set, **always** deploy that branch (ignores webhook branch)
 - If `DEPLOY_BRANCH` is not set, deploy from whichever branch triggered the webhook
-- Useful for platforms like Tangled that don't support branch filtering in webhook settings
+- Useful for platforms like SourceHut that don't include branch info in webhook payloads
 
 ### Example: Multiple Projects
 
@@ -145,6 +145,76 @@ PROJECT_SHOP_BUNNY_PULL_ZONE_DOMAIN=shop.example.com
 ```
 
 ## Webhook Setup
+
+### SourceHut
+
+SourceHut uses a GraphQL-native webhook system. Webhooks are configured via the GraphQL API rather than a web UI.
+
+> **Note:** The `WEBHOOK_SECRET` environment variable is not used for SourceHut — signature verification is done automatically using SourceHut's well-known Ed25519 public key (`X-Payload-Signature` + `X-Payload-Nonce` headers).
+
+1. Create a personal access token at [meta.sr.ht/oauth2](https://meta.sr.ht/oauth2) with the following scope:
+   - **git.sr.ht / REPOSITORIES** → **RW**
+
+2. Find your repository ID:
+
+```bash
+curl \
+  --oauth2-bearer "your-personal-access-token" \
+  -H 'Content-Type: application/json' \
+  -d '{"query": "{ me { repositories { results { id name } } } }"}' \
+  https://git.sr.ht/query
+```
+
+3. Create the webhook subscription (replace `YOUR_REPO_ID` with the ID from step 2):
+
+```bash
+curl \
+  --oauth2-bearer "your-personal-access-token" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "query": "mutation { createGitWebhook(config: { repositoryID: YOUR_REPO_ID url: \"http://your-server:3000/hook/{PROJECT_ID}\" events: [GIT_POST_RECEIVE] query: \"query { webhook { uuid event date ... on GitEvent { updates { ref { name } old { id } new { id } } } } }\" }) { id } }"
+  }' \
+  https://git.sr.ht/query
+```
+
+**GraphQL query used for the webhook subscription:**
+
+```graphql
+query {
+  webhook {
+    uuid
+    event
+    date
+    ... on GitEvent {
+      updates {
+        ref { name }
+        old { id }
+        new { id }
+      }
+    }
+  }
+}
+```
+
+**To delete a webhook** (use the ID returned from the create mutation):
+
+```bash
+curl \
+  --oauth2-bearer "your-personal-access-token" \
+  -H 'Content-Type: application/json' \
+  -d '{"query": "mutation { deleteGitWebhook(id: WEBHOOK_ID) { id } }"}' \
+  https://git.sr.ht/query
+```
+
+**To list existing webhooks and inspect deliveries:**
+
+```bash
+curl \
+  --oauth2-bearer "your-personal-access-token" \
+  -H 'Content-Type: application/json' \
+  -d '{"query": "{ gitWebhooks(repositoryID: YOUR_REPO_ID) { results { id url events deliveries { results { uuid date responseStatus } } } } }"}' \
+  https://git.sr.ht/query
+```
 
 ### Forgejo (Codeberg)
 
@@ -190,7 +260,6 @@ Note: GitHub automatically includes the signature in the `X-Hub-Signature-256` h
 7. Click **Add webhook**
 
 Note: GitLab sends the secret token in the `X-Gitlab-Token` header. Webhook deduplication uses GitLab's `Idempotency-Key` header to prevent replay attacks while allowing legitimate retries.
-
 
 ## API Endpoints
 
@@ -241,6 +310,7 @@ The application is built with:
 ## Adding a New Provider
 
 BunnySync uses a provider system to support different Git hosting platforms. Currently supported:
+- **SourceHut** (free-software forge with GraphQL-native webhooks and Ed25519 signatures)
 - **GitHub** (world's largest Git hosting platform)
 - **GitLab** (popular open-source DevOps platform, gitlab.com and self-hosted)
 - **Forgejo** (used by Codeberg)
@@ -251,8 +321,7 @@ To add a new provider:
 ### 1. Fork and clone
 
 ```bash
-# Fork the repository on Codeberg first, then clone your fork
-git clone https://codeberg.org/p1xel/BunnySync.git
+git clone https://git.sr.ht/~p1xel/BunnySync
 cd bunnysync
 ```
 
@@ -284,7 +353,7 @@ impl GitProvider for MyProvider {
 }
 ```
 
-See existing providers (`src/providers/forgejo.rs`, `src/providers/tangled.rs`) for full implementation examples.
+See existing providers (`src/providers/forgejo.rs`, `src/providers/sourcehut.rs`) for full implementation examples.
 
 ### 3. Register the provider
 
@@ -293,28 +362,29 @@ Update `src/providers/mod.rs` to add your provider:
 ```rust
 pub mod forgejo;
 pub mod github;
+pub mod gitlab;
+pub mod sourcehut;
 pub mod tangled;
 pub mod myprovider;  // Add this line
 
 pub fn detect_provider(headers: &HeaderMap) -> Option<Box<dyn GitProvider>> {
-    // Check for Forgejo first (Codeberg uses Forgejo - priority platform)
     if headers.contains_key("X-Forgejo-Event") {
         Some(Box::new(forgejo::ForgejoProvider))
-    }
-    // Check for Tangled
-    else if headers.contains_key("X-Tangled-Event") {
+    } else if headers.contains_key("X-Tangled-Event") {
         Some(Box::new(tangled::TangledProvider))
-    }
-    // Check for GitHub
-    else if headers.contains_key("X-GitHub-Event") {
+    } else if headers.contains_key("X-GitHub-Event") {
         Some(Box::new(github::GithubProvider))
+    } else if headers.contains_key("X-Gitlab-Event") {
+        Some(Box::new(gitlab::GitlabProvider))
+    } else if headers.contains_key("X-Payload-Signature")
+        && headers.contains_key("X-Payload-Nonce")
+    {
+        Some(Box::new(sourcehut::SourcehutProvider))
     }
     // Add your provider here
     else if headers.contains_key("X-MyProvider-Event") {
         Some(Box::new(myprovider::MyProvider))
-    }
-    // No matching provider found
-    else {
+    } else {
         None
     }
 }
@@ -372,7 +442,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 ```bash
 # Clone repository
-git clone https://codeberg.org/p1xel/BunnySync.git
+git clone https://git.sr.ht/~p1xel/BunnySync
 cd bunnysync
 
 # Build release binary
